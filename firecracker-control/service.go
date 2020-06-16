@@ -16,7 +16,6 @@ package service
 import (
 	"context"
 	"fmt"
-
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/ttrpc"
@@ -125,4 +124,19 @@ func (s *service) GetBalloonStats(ctx context.Context, req *proto.GetBalloonStat
 func (s *service) UpdateBalloonStats(ctx context.Context, req *proto.UpdateBalloonStatsRequest) (*types.Empty, error) {
 	log.G(ctx).Debug("Updating balloon device statistics polling interval")
 	return s.local.UpdateBalloonStats(ctx, req)
+}
+
+func (s *service) LoadSnapshot(ctx context.Context, req *proto.LoadSnapshotRequest) (*proto.LoadResponse, error) {
+	log.G(ctx).Debugf("load snapshot request: %+v", req)
+	return s.local.LoadSnapshot(ctx, req)
+}
+
+func (s *service) CreateSnapshot(ctx context.Context, req *proto.CreateSnapshotRequest) (*types.Empty, error) {
+	log.G(ctx).Debugf("create snapshot request: %+v", req)
+	return s.local.CreateSnapshot(ctx, req)
+}
+
+func (s *service) Offload(ctx context.Context, req *proto.OffloadRequest) (*types.Empty, error) {
+	log.G(ctx).Debugf("offload request: %+v", req)
+	return s.local.Offload(ctx, req)
 }
