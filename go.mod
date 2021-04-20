@@ -2,10 +2,13 @@ module github.com/firecracker-microvm/firecracker-containerd
 
 require (
 <<<<<<< HEAD
+<<<<<<< HEAD
 	github.com/Microsoft/go-winio v0.5.0 // indirect
 =======
 	github.com/Microsoft/go-winio v0.4.14 // indirect
 >>>>>>> bf6cbe3 (Implemented resume and pause call chain.)
+=======
+>>>>>>> 006fb79 (remove duplicates resulting from rebase)
 	github.com/StackExchange/wmi v0.0.0-20181212234831-e0a55b97c705 // indirect
 	github.com/awslabs/tc-redirect-tap v0.0.0-20200708224642-a0300978797d
 	github.com/bits-and-blooms/bitset v1.2.1 // indirect
@@ -19,7 +22,6 @@ require (
 	github.com/containernetworking/plugins v0.9.1
 	github.com/firecracker-microvm/firecracker-go-sdk v0.22.1-0.20210520223842-abd0815b8bf9
 	github.com/go-ole/go-ole v1.2.4 // indirect
-	github.com/godbus/dbus v0.0.0-20181025153459-66d97aec3384 // indirect
 	github.com/gofrs/uuid v3.3.0+incompatible
 	github.com/gogo/googleapis v1.4.1 // indirect
 	github.com/gogo/protobuf v1.3.2
@@ -28,21 +30,24 @@ require (
 	github.com/google/uuid v1.3.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.0
 <<<<<<< HEAD
+<<<<<<< HEAD
 	github.com/klauspost/compress v1.13.6 // indirect
 =======
 	github.com/imdario/mergo v0.3.8 // indirect
 >>>>>>> bf6cbe3 (Implemented resume and pause call chain.)
+=======
+>>>>>>> 006fb79 (remove duplicates resulting from rebase)
 	github.com/mdlayher/vsock v0.0.0-20190329173812-a92c53d5dcab
 	github.com/miekg/dns v1.1.25
 	github.com/opencontainers/runc v1.0.2
 	github.com/opencontainers/runtime-spec v1.0.3-0.20210910115017-0d6cc581aeea
 	github.com/opencontainers/selinux v1.8.5 // indirect
 	github.com/pkg/errors v0.9.1
-	github.com/prometheus/client_golang v0.9.2 // indirect
 	github.com/shirou/gopsutil v2.18.12+incompatible
 	github.com/shirou/w32 v0.0.0-20160930032740-bb4de0191aa4 // indirect
 	github.com/sirupsen/logrus v1.8.1
 	github.com/stretchr/testify v1.6.1
+	github.com/tv42/httpunix v0.0.0-20191220191345-2ba4b9c3382c
 	github.com/vishvananda/netlink v1.1.1-0.20201029203352-d40f9887b852
 	go.opencensus.io v0.23.0 // indirect
 	golang.org/x/net v0.0.0-20211005001312-d4b1ae081e3b // indirect
