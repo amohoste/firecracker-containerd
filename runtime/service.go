@@ -662,15 +662,15 @@ func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRe
 // specified in the VM config. If the namespace is not specified, the process
 // is started in the default network namespace.
 func (s *service) netNSStartVM(ctx context.Context, request *proto.CreateVMRequest) error {
-	netNS := netNSFromProto(request)
+	namespace := netNSFromProto(request)
 
-	if netNS == "" {
+	if namespace == "" {
 		// Start without namespace
 		return s.machine.Start(ctx)
 	}
 
 	// Get the network namespace handle.
-	netNS, err := ns.GetNS(netNS)
+	netNS, err := ns.GetNS(namespace)
 	if err != nil {
 		return errors.Wrapf(err, "unable to find netns %s", netNS)
 	}
