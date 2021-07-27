@@ -63,7 +63,6 @@ type Config struct {
 }
 
 // JailerConfig houses a set of configurable values for jailing
-// TODO: Add netns field
 type JailerConfig struct {
 	RuncBinaryPath string `json:"runc_binary_path"`
 	RuncConfigPath string `json:"runc_config_path"`
