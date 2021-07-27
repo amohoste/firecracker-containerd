@@ -35,7 +35,7 @@ import (
 	// secure randomness
 	"math/rand" // #nosec
 
-	"github.com/containerd/containerd/api/types/task"
+	task "github.com/containerd/containerd/api/types/task"
 	"github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/events/exchange"
@@ -142,6 +142,7 @@ type service struct {
 	shimCancel func()
 
 	vmID    string
+	netnamespace	string
 	shimDir vm.Dir
 
 	config *config.Config
@@ -327,6 +328,9 @@ func (s *service) serveFCControl() error {
 	return nil
 }
 
+// In the runtime v2 model, when containerd starts a new Task, it will always invoke the runtime binary specified
+// in the Container object and run its “shim start” routine. This is the point where the runtime shim will decide
+// whether it should keep running or if containerd should instead use a different, pre-existing shim process.
 func (s *service) StartShim(shimCtx context.Context, opts shim.StartOpts) (string, error) {
 	// In the shim start routine, we can assume that containerd provided a "log" FIFO in the current working dir.
 	// We have to use that instead of stdout/stderr because containerd reads the stdio pipes of shim start to get
@@ -513,7 +517,7 @@ func (s *service) CreateVM(requestCtx context.Context, request *proto.CreateVMRe
 
 	// Commented out because its execution cancels the shim, and
 	// it would get executed on Offload if we leave it, killing the shim,
-	// and making snapshots impossible.
+	// and making snapshots impossible. TODO: maybe not needed anymore
 	//go s.monitorVMExit()
 
 	// let all the other methods know that the VM is ready for tasks
@@ -662,15 +666,13 @@ func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRe
 // specified in the VM config. If the namespace is not specified, the process
 // is started in the default network namespace.
 func (s *service) netNSStartVM(ctx context.Context, request *proto.CreateVMRequest) error {
-	namespace := netNSFromProto(request)
-
-	if namespace == "" {
+	if s.netnamespace == "" {
 		// Start without namespace
 		return s.machine.Start(ctx)
 	}
 
 	// Get the network namespace handle.
-	netNS, err := ns.GetNS(namespace)
+	netNS, err := ns.GetNS(s.netnamespace)
 	if err != nil {
 		return errors.Wrapf(err, "unable to find netns %s", netNS)
 	}
@@ -1723,6 +1725,7 @@ func (s *service) cleanup() error {
 	return s.cleanupErr
 }
 
+// TODO: might need again
 // monitorVMExit watches the VM and cleanup resources when it terminates.
 // Comment out because unused
 /*
