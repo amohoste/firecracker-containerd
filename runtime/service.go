@@ -35,7 +35,7 @@ import (
 	// secure randomness
 	"math/rand" // #nosec
 
-	"github.com/containerd/containerd/api/types/task"
+	task "github.com/containerd/containerd/api/types/task"
 	"github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/events/exchange"
@@ -327,6 +327,9 @@ func (s *service) serveFCControl() error {
 	return nil
 }
 
+// In the runtime v2 model, when containerd starts a new Task, it will always invoke the runtime binary specified
+// in the Container object and run its “shim start” routine. This is the point where the runtime shim will decide
+// whether it should keep running or if containerd should instead use a different, pre-existing shim process.
 func (s *service) StartShim(shimCtx context.Context, opts shim.StartOpts) (string, error) {
 	// In the shim start routine, we can assume that containerd provided a "log" FIFO in the current working dir.
 	// We have to use that instead of stdout/stderr because containerd reads the stdio pipes of shim start to get
@@ -513,7 +516,7 @@ func (s *service) CreateVM(requestCtx context.Context, request *proto.CreateVMRe
 
 	// Commented out because its execution cancels the shim, and
 	// it would get executed on Offload if we leave it, killing the shim,
-	// and making snapshots impossible.
+	// and making snapshots impossible. TODO: maybe not needed anymore
 	//go s.monitorVMExit()
 
 	// let all the other methods know that the VM is ready for tasks
@@ -1723,6 +1726,7 @@ func (s *service) cleanup() error {
 	return s.cleanupErr
 }
 
+// TODO: might need again
 // monitorVMExit watches the VM and cleanup resources when it terminates.
 // Comment out because unused
 /*
@@ -1883,6 +1887,9 @@ func (s *service) startFirecrackerProcess() error {
 	firecrackerCmd := exec.Command(firecPath, args...)
 	firecrackerCmd.Dir = s.shimDir.RootPath()
 
+	// Make sure all child processes get killed
+	firecrackerCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	if err := firecrackerCmd.Start(); err != nil {
 		logrus.WithError(err).Error("Failed to start firecracker process")
 	}
@@ -2026,10 +2033,20 @@ func (s *service) CreateSnapshot(ctx context.Context, req *proto.CreateSnapshotR
 // Offload Shuts down a VM and deletes the corresponding firecracker socket
 // and vsock. All of the other resources will persist
 func (s *service) Offload(ctx context.Context, req *proto.OffloadRequest) (*empty.Empty, error) {
-	if err := syscall.Kill(s.firecrackerPid, 9); err != nil {
-		s.logger.WithError(err).Error("Failed to kill firecracker process")
-		return nil, err
+
+	if !s.snapLoaded {
+		if err := syscall.Kill(s.firecrackerPid, 9); err != nil {
+			s.logger.WithError(err).Error("Failed to kill firecracker process")
+			return nil, err
+		}
+	} else {
+		// Make sure to kill child process if snaploaded
+		if err := syscall.Kill(-s.firecrackerPid, 9); err != nil {
+			s.logger.WithError(err).Error("Failed to kill firecracker process")
+			return nil, err
+		}
 	}
+
 
 	if err := os.RemoveAll(s.shimDir.FirecrackerSockPath()); err != nil {
 		s.logger.WithError(err).Error("Failed to delete firecracker socket")
