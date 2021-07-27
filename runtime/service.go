@@ -142,7 +142,6 @@ type service struct {
 	shimCancel func()
 
 	vmID    string
-	netnamespace	string
 	shimDir vm.Dir
 
 	config *config.Config
@@ -666,13 +665,15 @@ func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRe
 // specified in the VM config. If the namespace is not specified, the process
 // is started in the default network namespace.
 func (s *service) netNSStartVM(ctx context.Context, request *proto.CreateVMRequest) error {
-	if s.netnamespace == "" {
+	namespace := netNSFromProto(request)
+
+	if namespace == "" {
 		// Start without namespace
 		return s.machine.Start(ctx)
 	}
 
 	// Get the network namespace handle.
-	netNS, err := ns.GetNS(s.netnamespace)
+	netNS, err := ns.GetNS(namespace)
 	if err != nil {
 		return errors.Wrapf(err, "unable to find netns %s", netNS)
 	}
