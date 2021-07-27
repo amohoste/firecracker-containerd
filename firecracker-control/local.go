@@ -128,7 +128,7 @@ func (s *local) CreateShim(requestCtx context.Context, id string) (codes.Code, e
 	// Validate VM id
 	if err := identifiers.Validate(id); err != nil {
 		s.logger.WithError(err).Error()
-		return err
+		return codes.Unknown, err
 	}
 
 	// Validate namespace
@@ -136,7 +136,7 @@ func (s *local) CreateShim(requestCtx context.Context, id string) (codes.Code, e
 	if err != nil {
 		err = errors.Wrap(err, "error retrieving namespace of request")
 		s.logger.WithError(err).Error()
-		return err
+		return codes.Unknown, err
 	}
 
 	s.logger.Debugf("using namespace: %s", ns)
