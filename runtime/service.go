@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"math"
 	"net"
 	"net/http"
@@ -2055,7 +2056,8 @@ func (s *service) LoadSnapshot(ctx context.Context, req *proto.LoadSnapshotReque
 		}
 
 		if !strings.Contains(resp.Status, "204") {
-			return errors.New(fmt.Sprintf("Failed to load VM from snapshot, status %s", resp.Status))
+			responseData, _ := ioutil.ReadAll(resp.Body)
+			return errors.New(fmt.Sprintf("Failed to load VM from snapshot, status %s. Response %s", resp.Status, string(responseData)))
 		}
 
 		return nil
