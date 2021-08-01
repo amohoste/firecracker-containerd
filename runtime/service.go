@@ -1893,7 +1893,9 @@ func (s *service) startFirecrackerProcess(namespace string) error {
 	if namespace == "" {
 		firecrackerCmd = exec.Command(firecPath, args...)
 	} else {
-		firecrackerCmd = exec.Command("sudo", append([]string{"nsenter", fmt.Sprintf("--net=%s", firecPath)}, args...)...)
+		cmdArgs := append([]string{"nsenter", fmt.Sprintf("--net=%s", namespace), firecPath}, args...)
+		s.logger.Debugf("Starting firecracker in ns: %s", strings.Join(cmdArgs," "))
+		firecrackerCmd = exec.Command("sudo", cmdArgs...)
 	}
 	firecrackerCmd.Dir = s.shimDir.RootPath()
 
