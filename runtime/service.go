@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/coreos/etcd/client"
 	"math"
 	"net"
 	"net/http"
@@ -174,6 +175,9 @@ type service struct {
 	httpControlClient   *http.Client
 	firecrackerPid      int
 	taskDrivePathOnHost string
+
+	snapLoaded bool
+	networkNamespace string
 }
 
 func shimOpts(shimCtx context.Context) (*shim.Opts, error) {
@@ -624,6 +628,7 @@ func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRe
 		return errors.Wrapf(err, "failed to create new machine instance")
 	}
 
+	s.networkNamespace = netNSFromProto(request)
 	if err = s.netNSStartVM(s.shimCtx, request); err != nil {
 		return errors.Wrapf(err, "failed to start the VM")
 	}
@@ -665,15 +670,13 @@ func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRe
 // specified in the VM config. If the namespace is not specified, the process
 // is started in the default network namespace.
 func (s *service) netNSStartVM(ctx context.Context, request *proto.CreateVMRequest) error {
-	namespace := netNSFromProto(request)
-
-	if namespace == "" {
+	if s.networkNamespace == "" {
 		// Start without namespace
 		return s.machine.Start(ctx)
 	}
 
 	// Get the network namespace handle.
-	netNS, err := ns.GetNS(namespace)
+	netNS, err := ns.GetNS(s.networkNamespace)
 	if err != nil {
 		return errors.Wrapf(err, "unable to find netns %s", netNS)
 	}
@@ -1858,7 +1861,7 @@ func formCreateSnapReq(snapshotPath, memPath string) (*http.Request, error) {
 	return req, nil
 }
 
-func (s *service) startFirecrackerProcess() error {
+func (s *service) startFirecrackerProcess(namespace string) error {
 	firecPath, err := exec.LookPath("firecracker")
 	if err != nil {
 		logrus.WithError(err).Error("failed to look up firecracker binary")
@@ -1884,7 +1887,13 @@ func (s *service) startFirecrackerProcess() error {
 		"--show-log-origin",
 	}
 
-	firecrackerCmd := exec.Command(firecPath, args...)
+	var firecrackerCmd *exec.Cmd
+
+	if namespace == "" {
+		firecrackerCmd = exec.Command(firecPath, args...)
+	} else {
+		firecrackerCmd = exec.Command("sudo","nsenter", "--net", firecPath, args...)
+	}
 	firecrackerCmd.Dir = s.shimDir.RootPath()
 
 	if err := firecrackerCmd.Start(); err != nil {
@@ -1957,21 +1966,38 @@ func (s *service) ResumeVM(ctx context.Context, req *proto.ResumeVMRequest) (*em
 		return nil, err
 	}
 
-	resp, err := s.httpControlClient.Do(resumeReq)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to send resume VM request")
-		return nil, err
+	if s.networkNamespace == "" {
+
+	} else {
+		err = netNS.Do(func(_ ns.NetNS) error {
+			resp, err := s.httpControlClient.Do(resumeReq)
+
+			if err != nil {
+				return err
+			}
+
+			if !strings.Contains(resp.Status, "204") {
+				return errors.New(fmt.Sprintf("Failed to resume VM, status %s", resp.Status))
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			s.logger.WithError(err).Error("Resume VM failed")
+			return nil, err
+		}
 	}
-	if !strings.Contains(resp.Status, "204") {
-		s.logger.WithError(err).Error("Failed to resume VM")
-		return nil, errors.New("Failed to resume VM")
-	}
+
 	return &empty.Empty{}, nil
 }
 
 // LoadSnapshot Loads a VM from a snapshot
 func (s *service) LoadSnapshot(ctx context.Context, req *proto.LoadSnapshotRequest) (*proto.LoadResponse, error) {
-	if err := s.startFirecrackerProcess(); err != nil {
+	s.networkNamespace = netNSFromSnapRequest(req)
+	s.snapLoaded = true
+
+	if err := s.startFirecrackerProcess(s.networkNamespace); err != nil {
 		s.logger.WithError(err).Error("startFirecrackerProcess returned an error")
 		return nil, err
 	}
@@ -1986,21 +2012,35 @@ func (s *service) LoadSnapshot(ctx context.Context, req *proto.LoadSnapshotReque
 		sendSockAddr = "dummy"
 	}
 
+	// Get the network namespace handle.
+	netNS, err := ns.GetNS(s.networkNamespace)
+	if err != nil {
+		fmt.Println("unable to find netns")
+	}
+
 	loadSnapReq, err := formLoadSnapReq(req.SnapshotFilePath, req.MemFilePath, sendSockAddr, req.EnableUserPF)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to create load snapshot request")
 		return nil, err
 	}
 
-	resp, err := s.httpControlClient.Do(loadSnapReq)
+	err = netNS.Do(func(_ ns.NetNS) error {
+		resp, err := s.httpControlClient.Do(loadSnapReq)
+
+		if err != nil {
+			return err
+		}
+
+		if !strings.Contains(resp.Status, "204") {
+			return errors.New(fmt.Sprintf("Failed to load VM from snapshot, status %s", resp.Status))
+		}
+
+		return nil
+	})
+
 	if err != nil {
-		s.logger.WithError(err).Error("Failed to send load snapshot request")
+		s.logger.WithError(err).Error("Loadsnapshot failed")
 		return nil, err
-	}
-	if !strings.Contains(resp.Status, "204") {
-		s.logger.WithError(err).Error("Failed to load VM from snapshot")
-		s.logger.WithError(err).Errorf("Status of request: %s", resp.Status)
-		return nil, errors.New("Failed to load VM from snapshot")
 	}
 
 	return &proto.LoadResponse{FirecrackerPID: strconv.Itoa(s.firecrackerPid)}, nil
