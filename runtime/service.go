@@ -2023,7 +2023,7 @@ func (s *service) LoadSnapshot(ctx context.Context, req *proto.LoadSnapshotReque
 		return nil, err
 	}
 
-	s.logger.Debugf("Dialing firecracker socket")
+	s.logger.Debugf("Dialing firecracker socket 2")
 	if err := netNS.Do(func(_ ns.NetNS) error { return s.dialFirecrackerSocket() }); err != nil {
 		s.logger.WithError(err).Error("Failed to wait for firecracker socket")
 	}
