@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/coreos/etcd/client"
 	"math"
 	"net"
 	"net/http"
@@ -1892,7 +1891,7 @@ func (s *service) startFirecrackerProcess(namespace string) error {
 	if namespace == "" {
 		firecrackerCmd = exec.Command(firecPath, args...)
 	} else {
-		firecrackerCmd = exec.Command("sudo","nsenter", "--net", firecPath, args...)
+		firecrackerCmd = exec.Command("sudo", append([]string{"nsenter", "--net", firecPath}, args...)...)
 	}
 	firecrackerCmd.Dir = s.shimDir.RootPath()
 
