@@ -635,12 +635,14 @@ func (s *local) CreateSnapshot(ctx context.Context, req *proto.CreateSnapshotReq
 func (s *local) LoadSnapshot(ctx context.Context, req *proto.LoadSnapshotRequest) (*proto.LoadResponse, error) {
 	var err error
 
+	s.logger.Debugf("Creating shim")
 	// Create shim if not exists yet
 	code, err := s.CreateShim(ctx, req.GetVMID())
 	if err != nil && code != codes.AlreadyExists {
 		return nil, err
 	}
 
+	s.logger.Debugf("Creating firecracker client")
 	client, err := s.shimFirecrackerClient(ctx, req.VMID)
 	if err != nil {
 		return nil, err
@@ -648,6 +650,7 @@ func (s *local) LoadSnapshot(ctx context.Context, req *proto.LoadSnapshotRequest
 
 	defer client.Close()
 
+	s.logger.Debugf("Loading snapshot")
 	resp, err := client.LoadSnapshot(ctx, req)
 	if err != nil {
 		s.logger.WithError(err).Error()
