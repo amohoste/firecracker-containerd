@@ -2010,14 +2010,18 @@ func (s *service) LoadSnapshot(ctx context.Context, req *proto.LoadSnapshotReque
 	s.networkNamespace = netNSFromSnapRequest(req)
 	s.snapLoaded = true
 
+	s.logger.Debugf("Starting firecracker process")
 	if err := s.startFirecrackerProcess(s.networkNamespace); err != nil {
 		s.logger.WithError(err).Error("startFirecrackerProcess returned an error")
 		return nil, err
 	}
 
+	s.logger.Debugf("Dialing firecracker socket")
 	if err := s.dialFirecrackerSocket(); err != nil {
 		s.logger.WithError(err).Error("Failed to wait for firecracker socket")
 	}
+
+	s.logger.Debugf("Creating http control client")
 	s.createHTTPControlClient()
 
 	sendSockAddr := s.shimDir.FirecrackerUPFSockPath()
@@ -2025,17 +2029,20 @@ func (s *service) LoadSnapshot(ctx context.Context, req *proto.LoadSnapshotReque
 		sendSockAddr = "dummy"
 	}
 
+	s.logger.Debugf("Getting namespace")
 	// Get the network namespace handle.
 	netNS, err := ns.GetNS(s.networkNamespace)
 	if err != nil {
 		fmt.Println("unable to find netns")
 	}
 
+	s.logger.Debugf("Creating snap request")
 	loadSnapReq, err := formLoadSnapReq(req.SnapshotFilePath, req.MemFilePath, sendSockAddr, req.EnableUserPF)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to create load snapshot request")
 		return nil, err
 	}
+
 
 	err = netNS.Do(func(_ ns.NetNS) error {
 		resp, err := s.httpControlClient.Do(loadSnapReq)
