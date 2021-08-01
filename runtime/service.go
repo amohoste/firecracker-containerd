@@ -1878,6 +1878,8 @@ func (s *service) startFirecrackerProcess(namespace string) error {
 		return err
 	}
 
+	s.logger.Debugf("Starting firecracker at %s", s.shimDir.FirecrackerSockPath())
+
 	args := []string{
 		"--api-sock", s.shimDir.FirecrackerSockPath(),
 		"--log-path", logFilePath,
@@ -2023,10 +2025,10 @@ func (s *service) LoadSnapshot(ctx context.Context, req *proto.LoadSnapshotReque
 		return nil, err
 	}
 
-	/*s.logger.Debugf("Dialing firecracker socket 2")
+	s.logger.Debugf("Dialing firecracker socket 2")
 	if err := netNS.Do(func(_ ns.NetNS) error { return s.dialFirecrackerSocket() }); err != nil {
 		s.logger.WithError(err).Error("Failed to wait for firecracker socket")
-	}*/
+	}
 
 	s.logger.Debugf("Creating http control client")
 	s.createHTTPControlClient()
