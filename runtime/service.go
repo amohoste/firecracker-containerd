@@ -1966,8 +1966,22 @@ func (s *service) ResumeVM(ctx context.Context, req *proto.ResumeVMRequest) (*em
 	}
 
 	if s.networkNamespace == "" {
-
+		resp, err := s.httpControlClient.Do(resumeReq)
+		if err != nil {
+			s.logger.WithError(err).Error("Failed to send resume VM request")
+			return nil, err
+		}
+		if !strings.Contains(resp.Status, "204") {
+			s.logger.WithError(err).Error("Failed to resume VM")
+			return nil, errors.New("Failed to resume VM")
+		}
 	} else {
+		// Get the network namespace handle.
+		netNS, err := ns.GetNS(s.networkNamespace)
+		if err != nil {
+			fmt.Println("unable to find netns")
+		}
+
 		err = netNS.Do(func(_ ns.NetNS) error {
 			resp, err := s.httpControlClient.Do(resumeReq)
 
