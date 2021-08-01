@@ -1900,6 +1900,9 @@ func (s *service) startFirecrackerProcess(namespace string) error {
 	}
 	firecrackerCmd.Dir = s.shimDir.RootPath()
 
+	// Make sure all child processes get killed
+	firecrackerCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	if err := firecrackerCmd.Start(); err != nil {
 		logrus.WithError(err).Error("Failed to start firecracker process")
 	}
@@ -2095,10 +2098,20 @@ func (s *service) CreateSnapshot(ctx context.Context, req *proto.CreateSnapshotR
 // Offload Shuts down a VM and deletes the corresponding firecracker socket
 // and vsock. All of the other resources will persist
 func (s *service) Offload(ctx context.Context, req *proto.OffloadRequest) (*empty.Empty, error) {
-	if err := syscall.Kill(s.firecrackerPid, 9); err != nil {
-		s.logger.WithError(err).Error("Failed to kill firecracker process")
-		return nil, err
+
+	if !s.snapLoaded {
+		if err := syscall.Kill(s.firecrackerPid, 9); err != nil {
+			s.logger.WithError(err).Error("Failed to kill firecracker process")
+			return nil, err
+		}
+	} else {
+		// Make sure to kill child process if snaploaded
+		if err := syscall.Kill(-s.firecrackerPid, 9); err != nil {
+			s.logger.WithError(err).Error("Failed to kill firecracker process")
+			return nil, err
+		}
 	}
+
 
 	if err := os.RemoveAll(s.shimDir.FirecrackerSockPath()); err != nil {
 		s.logger.WithError(err).Error("Failed to delete firecracker socket")
