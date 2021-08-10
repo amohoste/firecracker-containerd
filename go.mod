@@ -25,9 +25,13 @@ require (
 	github.com/gofrs/uuid v3.3.0+incompatible
 	github.com/gogo/googleapis v1.4.1 // indirect
 	github.com/gogo/protobuf v1.3.2
+<<<<<<< HEAD
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.2
 	github.com/google/uuid v1.3.0 // indirect
+=======
+	github.com/golang/protobuf v1.5.0
+>>>>>>> 303a1b6 (Add parameter to overwrite devmapper snapshot device when loading snapshots)
 	github.com/hashicorp/go-multierror v1.1.0
 <<<<<<< HEAD
 <<<<<<< HEAD
@@ -38,10 +42,16 @@ require (
 =======
 >>>>>>> 006fb79 (remove duplicates resulting from rebase)
 	github.com/mdlayher/vsock v0.0.0-20190329173812-a92c53d5dcab
+<<<<<<< HEAD
 	github.com/miekg/dns v1.1.25
 	github.com/opencontainers/runc v1.0.2
 	github.com/opencontainers/runtime-spec v1.0.3-0.20210910115017-0d6cc581aeea
 	github.com/opencontainers/selinux v1.8.5 // indirect
+=======
+	github.com/miekg/dns v1.1.16
+	github.com/opencontainers/runc v1.0.1
+	github.com/opencontainers/runtime-spec v1.0.3-0.20210326190908-1c3f411f0417
+>>>>>>> 303a1b6 (Add parameter to overwrite devmapper snapshot device when loading snapshots)
 	github.com/pkg/errors v0.9.1
 	github.com/shirou/gopsutil v2.18.12+incompatible
 	github.com/shirou/w32 v0.0.0-20160930032740-bb4de0191aa4 // indirect
@@ -49,6 +59,7 @@ require (
 	github.com/stretchr/testify v1.6.1
 	github.com/tv42/httpunix v0.0.0-20191220191345-2ba4b9c3382c
 	github.com/vishvananda/netlink v1.1.1-0.20201029203352-d40f9887b852
+<<<<<<< HEAD
 	go.opencensus.io v0.23.0 // indirect
 	golang.org/x/net v0.0.0-20211005001312-d4b1ae081e3b // indirect
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
@@ -60,6 +71,16 @@ require (
 
 replace (
 	// Pin gPRC-related dependencies as like containerd v1.5.x.
+=======
+	golang.org/x/sync v0.0.0-20201207232520-09787c993a3a
+	golang.org/x/sys v0.0.0-20210426230700-d19ff857e887
+	google.golang.org/grpc v1.34.0
+)
+
+replace (
+	github.com/containerd/containerd => github.com/amohoste/containerd v1.5.5-ids
+	// Pin gPRC-related dependencies as like containerd v1.5.1
+>>>>>>> 303a1b6 (Add parameter to overwrite devmapper snapshot device when loading snapshots)
 	github.com/gogo/googleapis => github.com/gogo/googleapis v1.3.2
 	github.com/golang/protobuf => github.com/golang/protobuf v1.3.5
 
