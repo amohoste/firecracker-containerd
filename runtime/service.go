@@ -113,7 +113,7 @@ type loadSnapReq struct {
 	MemFilePath          string `json:"mem_file_path"`
 	SendSockAddr         string `json:"sock_file_path"`
 	EnableUserPageFaults bool   `json:"enable_user_page_faults"`
-	NewSnapshotPath		 bool	`json:"new_snapshot_path"`
+	NewSnapshotPath		 string	`json:"new_snapshot_path"`
 }
 
 // implements shimapi
