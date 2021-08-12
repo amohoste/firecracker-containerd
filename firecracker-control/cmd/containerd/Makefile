@@ -18,7 +18,7 @@ SOURCES := $(shell find ../../../config ../../../internal ../../../proto ../../ 
 GOMOD := $(shell go env GOMOD)
 GOSUM := $(GOMOD:.mod=.sum)
 REVISION=$(shell git rev-parse HEAD)
-VERSION_LDFLAGS="-X github.com/containerd/containerd/version.Revision=$(REVISION)"
+VERSION_LDFLAGS="-X github.com/amohoste/containerd/version.Revision=$(REVISION)"
 
 all: build
 
