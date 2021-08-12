@@ -33,7 +33,7 @@ require (
 )
 
 replace (
-	github.com/containerd/containerd => github.com/amohoste/containerd v1.5.5-patch3
+	github.com/containerd/containerd => github.com/amohoste/containerd v1.5.5-patch4
 	// Pin gPRC-related dependencies as like containerd v1.5.1
 	github.com/gogo/googleapis => github.com/gogo/googleapis v1.3.2
 	github.com/golang/protobuf => github.com/golang/protobuf v1.3.5
