@@ -30,7 +30,7 @@ firecracker-containerd: $(SOURCES) $(GOMOD) $(GOSUM)
 
 firecracker-ctr: $(GOMOD) $(GOSUM)
 	GOBIN=$(CURDIR) go install -tags=no_cri $(EXTRAGOARGS) \
-		-ldflags $(VERSION_LDFLAGS) github.com/amohoste/containerd/cmd/ctr
+		-ldflags $(VERSION_LDFLAGS) github.com/containerd/containerd/cmd/ctr
 	mv ctr firecracker-ctr
 
 install: firecracker-containerd firecracker-ctr
