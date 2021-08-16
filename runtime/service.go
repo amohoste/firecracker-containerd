@@ -519,10 +519,8 @@ func (s *service) CreateVM(requestCtx context.Context, request *proto.CreateVMRe
 		s.logger.WithError(err).Error("failed to publish start VM event")
 	}
 
-	// Commented out because its execution cancels the shim, and
-	// it would get executed on Offload if we leave it, killing the shim,
-	// and making snapshots impossible. TODO: maybe not needed anymore
-	//go s.monitorVMExit()
+	// Cancels the shim
+	go s.monitorVMExit()
 
 	// let all the other methods know that the VM is ready for tasks
 	close(s.vmReady)
@@ -699,8 +697,12 @@ func (s *service) mountDrives(requestCtx context.Context) error {
 
 // StopVM will shutdown the VMM. Unlike Shutdown, this method is exposed to containerd clients.
 // If the VM has not been created yet and the timeout is hit waiting for it to exist, an error will be returned
+<<<<<<< HEAD
 // but the shim will continue to shutdown. Similarly if we detect that the VM is in pause state, then
 // we are unable to communicate to the in-VM agent. In this case, we do a forceful shutdown.
+=======
+// but the shim will continue to shutdown. TODO: update
+>>>>>>> caca271 (add namespaces to all requests + shutdown VMM on offload)
 func (s *service) StopVM(requestCtx context.Context, request *proto.StopVMRequest) (_ *empty.Empty, err error) {
 	defer logPanicAndDie(s.logger)
 	s.logger.WithFields(logrus.Fields{"timeout_seconds": request.TimeoutSeconds}).Debug("StopVM")
@@ -1753,10 +1755,7 @@ func (s *service) cleanup() error {
 	return s.cleanupErr
 }
 
-// TODO: might need again
 // monitorVMExit watches the VM and cleanup resources when it terminates.
-// Comment out because unused
-/*
 func (s *service) monitorVMExit() {
 	// Block until the VM exits
 	if err := s.machine.Wait(s.shimCtx); err != nil && err != context.Canceled {
@@ -1767,7 +1766,6 @@ func (s *service) monitorVMExit() {
 		s.logger.WithError(err).Error("failed to clean up the VM")
 	}
 }
-*/
 
 func (s *service) createHTTPControlClient() {
 	u := &httpunix.Transport{
@@ -1841,7 +1839,7 @@ func formLoadSnapReq(snapshotPath, memPath, sendSockAddr string, isUpf bool, new
 		MemFilePath:          memPath,
 		SendSockAddr:         sendSockAddr,
 		EnableUserPageFaults: isUpf,
-		NewSnapshotPath:           newSnapshotPath,
+		NewSnapshotPath:      newSnapshotPath,
 	}
 
 	json, err := json.Marshal(data)
@@ -1977,17 +1975,40 @@ func (s *service) PauseVM(ctx context.Context, req *proto.PauseVMRequest) (*empt
 		return nil, err
 	}
 
-	resp, err := s.httpControlClient.Do(pauseReq)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to send pause VM request")
-		return nil, err
+	if s.networkNamespace == "" {
+		err = s.SendPauseVmRequest(pauseReq)
+	} else {
+		// Get the network namespace handle.
+		netNS, err := ns.GetNS(s.networkNamespace)
+		if err != nil {
+			fmt.Println("unable to find netns")
+		}
+
+		err = netNS.Do(func(_ ns.NetNS) error {
+			return s.SendPauseVmRequest(pauseReq)
+		})
 	}
-	if !strings.Contains(resp.Status, "204") {
-		s.logger.WithError(err).Error("Failed to pause VM")
-		return nil, errors.New("Failed to pause VM")
+
+	if err != nil {
+		s.logger.WithError(err).Error("Pause VM failed")
+		return nil, err
 	}
 
 	return &empty.Empty{}, nil
+}
+
+func (s *service) SendPauseVmRequest(pauseReq *http.Request) error {
+	resp, err := s.httpControlClient.Do(pauseReq)
+
+	if err != nil {
+		return errors.Wrapf(err, "Failed to send pause VM request")
+	}
+
+	if !strings.Contains(resp.Status, "204") {
+		return errors.New(fmt.Sprintf("Failed to pause VM, status %s", resp.Status))
+	}
+
+	return nil
 }
 
 // ResumeVM Resumes a VM
@@ -1999,15 +2020,7 @@ func (s *service) ResumeVM(ctx context.Context, req *proto.ResumeVMRequest) (*em
 	}
 
 	if s.networkNamespace == "" {
-		resp, err := s.httpControlClient.Do(resumeReq)
-		if err != nil {
-			s.logger.WithError(err).Error("Failed to send resume VM request")
-			return nil, err
-		}
-		if !strings.Contains(resp.Status, "204") {
-			s.logger.WithError(err).Error("Failed to resume VM")
-			return nil, errors.New("Failed to resume VM")
-		}
+		err = s.SendResumeVmRequest(resumeReq)
 	} else {
 		// Get the network namespace handle.
 		netNS, err := ns.GetNS(s.networkNamespace)
@@ -2016,26 +2029,30 @@ func (s *service) ResumeVM(ctx context.Context, req *proto.ResumeVMRequest) (*em
 		}
 
 		err = netNS.Do(func(_ ns.NetNS) error {
-			resp, err := s.httpControlClient.Do(resumeReq)
-
-			if err != nil {
-				return err
-			}
-
-			if !strings.Contains(resp.Status, "204") {
-				return errors.New(fmt.Sprintf("Failed to resume VM, status %s", resp.Status))
-			}
-
-			return nil
+			return s.SendResumeVmRequest(resumeReq)
 		})
+	}
 
-		if err != nil {
-			s.logger.WithError(err).Error("Resume VM failed")
-			return nil, err
-		}
+	if err != nil {
+		s.logger.WithError(err).Error("Resume VM failed")
+		return nil, err
 	}
 
 	return &empty.Empty{}, nil
+}
+
+func (s *service) SendResumeVmRequest(resumeReq *http.Request) error {
+	resp, err := s.httpControlClient.Do(resumeReq)
+
+	if err != nil {
+		return errors.Wrapf(err, "Failed to send resume VM request")
+	}
+
+	if !strings.Contains(resp.Status, "204") {
+		return errors.New(fmt.Sprintf("Failed to resume VM, status %s", resp.Status))
+	}
+
+	return nil
 }
 
 // LoadSnapshot Loads a VM from a snapshot
@@ -2043,25 +2060,21 @@ func (s *service) LoadSnapshot(ctx context.Context, req *proto.LoadSnapshotReque
 	s.networkNamespace = netNSFromSnapRequest(req)
 	s.snapLoaded = true
 
-	s.logger.Debugf("Getting namespace")
 	// Get the network namespace handle.
 	netNS, err := ns.GetNS(s.networkNamespace)
 	if err != nil {
 		fmt.Println("unable to find netns")
 	}
 
-	s.logger.Debugf("Starting firecracker process")
 	if err := s.startFirecrackerProcess(s.networkNamespace); err != nil {
 		s.logger.WithError(err).Error("startFirecrackerProcess returned an error")
 		return nil, err
 	}
 
-	s.logger.Debugf("Dialing firecracker socket 2")
 	if err := netNS.Do(func(_ ns.NetNS) error { return s.dialFirecrackerSocket() }); err != nil {
 		s.logger.WithError(err).Error("Failed to wait for firecracker socket")
 	}
 
-	s.logger.Debugf("Creating http control client")
 	s.createHTTPControlClient()
 
 	sendSockAddr := s.shimDir.FirecrackerUPFSockPath()
@@ -2069,7 +2082,6 @@ func (s *service) LoadSnapshot(ctx context.Context, req *proto.LoadSnapshotReque
 		sendSockAddr = "dummy"
 	}
 
-	s.logger.Debugf("Creating snap request")
 	loadSnapReq, err := formLoadSnapReq(req.SnapshotFilePath, req.MemFilePath, sendSockAddr, req.EnableUserPF, req.NewSnapshotPath)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to create load snapshot request")
@@ -2107,17 +2119,40 @@ func (s *service) CreateSnapshot(ctx context.Context, req *proto.CreateSnapshotR
 		return nil, err
 	}
 
-	resp, err := s.httpControlClient.Do(createSnapReq)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to send make snapshot request")
-		return nil, err
+	if s.networkNamespace == "" {
+		err = s.SendCreateSnapRequest(createSnapReq)
+	} else {
+		// Get the network namespace handle.
+		netNS, err := ns.GetNS(s.networkNamespace)
+		if err != nil {
+			fmt.Println("unable to find netns")
+		}
+
+		err = netNS.Do(func(_ ns.NetNS) error {
+			return s.SendCreateSnapRequest(createSnapReq)
+		})
 	}
-	if !strings.Contains(resp.Status, "204") {
-		s.logger.WithError(err).Error("Failed to make snapshot of VM")
-		return nil, errors.New("Failed to make snapshot of VM")
+
+	if err != nil {
+		s.logger.WithError(err).Error("Create snapshot failed")
+		return nil, err
 	}
 
 	return &empty.Empty{}, nil
+}
+
+func (s *service) SendCreateSnapRequest(createSnapReq *http.Request) error {
+	resp, err := s.httpControlClient.Do(createSnapReq)
+
+	if err != nil {
+		return errors.Wrapf(err, "Failed to send make snapshot request")
+	}
+
+	if !strings.Contains(resp.Status, "204") {
+		return errors.New(fmt.Sprintf("Failed to make snapshot of VM, status %s", resp.Status))
+	}
+
+	return nil
 }
 
 // Offload Shuts down a VM and deletes the corresponding firecracker socket
