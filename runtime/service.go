@@ -278,7 +278,7 @@ func (s *service) startEventForwarders(remotePublisher shim.Publisher) {
 		attachCh := eventbridge.Attach(ctx, s.eventBridgeClient, s.eventExchange)
 
 		err := <-attachCh
-		if err != nil && err != context.Canceled {
+		if err != nil && err != context.Canceled && !strings.Contains(err.Error(), "context canceled") {
 			s.logger.WithError(err).Error("error while forwarding events from VM agent")
 		}
 
@@ -2081,6 +2081,8 @@ func (s *service) LoadSnapshot(ctx context.Context, req *proto.LoadSnapshotReque
 		return nil, err
 	}
 
+	close(s.vmReady)
+
 	return &proto.LoadResponse{FirecrackerPID: strconv.Itoa(s.firecrackerPid)}, nil
 }
 
@@ -2132,6 +2134,11 @@ func (s *service) SendCreateSnapRequest(createSnapReq *http.Request) error {
 // and vsock. All of the other resources will persist
 func (s *service) Offload(ctx context.Context, req *proto.OffloadRequest) (*empty.Empty, error) {
 
+	_, err := s.agentClient.Shutdown(ctx, &taskAPI.ShutdownRequest{Now: true})
+	if err != nil {
+		return nil, err
+	}
+
 	if !s.snapLoaded {
 		if err := syscall.Kill(s.firecrackerPid, 9); err != nil {
 			s.logger.WithError(err).Error("Failed to kill firecracker process")
@@ -2144,7 +2151,6 @@ func (s *service) Offload(ctx context.Context, req *proto.OffloadRequest) (*empt
 			return nil, err
 		}
 	}
-
 
 	if err := os.RemoveAll(s.shimDir.FirecrackerSockPath()); err != nil {
 		s.logger.WithError(err).Error("Failed to delete firecracker socket")
@@ -2159,6 +2165,10 @@ func (s *service) Offload(ctx context.Context, req *proto.OffloadRequest) (*empt
 	if err := os.RemoveAll(s.shimDir.FirecrackerUPFSockPath()); err != nil {
 		s.logger.WithError(err).Error("Failed to delete firecracker UPF socket")
 		return nil, err
+	}
+
+	if err := s.cleanup(); err != nil {
+		s.logger.WithError(err).Error("failed to clean up the VM")
 	}
 
 	return &empty.Empty{}, nil
