@@ -2136,12 +2136,12 @@ func (s *service) SendCreateSnapRequest(createSnapReq *http.Request) error {
 // and vsock. All of the other resources will persist
 func (s *service) Offload(ctx context.Context, req *proto.OffloadRequest) (*empty.Empty, error) {
 
-	_, err := s.agentClient.Shutdown(ctx, &taskAPI.ShutdownRequest{Now: true})
-	if err != nil {
-		return nil, err
-	}
-
 	if !s.snapLoaded {
+		_, err := s.agentClient.Shutdown(ctx, &taskAPI.ShutdownRequest{Now: true})
+		if err != nil {
+			return nil, err
+		}
+
 		if err := syscall.Kill(s.firecrackerPid, 9); err != nil {
 			s.logger.WithError(err).Error("Failed to kill firecracker process")
 			return nil, err
