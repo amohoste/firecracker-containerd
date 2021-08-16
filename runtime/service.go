@@ -274,20 +274,22 @@ func (s *service) startEventForwarders(remotePublisher shim.Publisher) {
 	go func() {
 		<-s.vmReady
 
-		// Once the VM is ready, also start forwarding events from it to our exchange
-		attachCh := eventbridge.Attach(ctx, s.eventBridgeClient, s.eventExchange)
+		if ! s.snapLoaded {
+			// Once the VM is ready, also start forwarding events from it to our exchange
+			attachCh := eventbridge.Attach(ctx, s.eventBridgeClient, s.eventExchange)
 
-		err := <-attachCh
-		if err != nil && err != context.Canceled && !strings.Contains(err.Error(), "context canceled") {
-			s.logger.WithError(err).Error("error while forwarding events from VM agent")
+			err := <-attachCh
+			if err != nil && err != context.Canceled && !strings.Contains(err.Error(), "context canceled") {
+				s.logger.WithError(err).Error("error while forwarding events from VM agent")
+			}
+
+			err = <-republishCh
+			if err != nil && err != context.Canceled {
+				s.logger.WithError(err).Error("error while republishing events")
+			}
+
+			remotePublisher.Close()
 		}
-
-		err = <-republishCh
-		if err != nil && err != context.Canceled {
-			s.logger.WithError(err).Error("error while republishing events")
-		}
-
-		remotePublisher.Close()
 	}()
 }
 
