@@ -714,9 +714,37 @@ func (s *service) StopVM(requestCtx context.Context, request *proto.StopVMReques
 		return nil, err
 	}
 
-	if err = s.shutdown(requestCtx, timeout, &taskAPI.ShutdownRequest{Now: true}); err != nil {
-		return nil, err
+	if !s.snapLoaded {
+		if err = s.shutdown(requestCtx, timeout, &taskAPI.ShutdownRequest{Now: true}); err != nil {
+			return nil, err
+		}
+	} else {
+		// Make sure to kill child process if snaploaded
+		if err := syscall.Kill(-s.firecrackerPid, 9); err != nil {
+			s.logger.WithError(err).Error("Failed to kill firecracker process")
+			return nil, err
+		}
+
+		if err := os.RemoveAll(s.shimDir.FirecrackerSockPath()); err != nil {
+			s.logger.WithError(err).Error("Failed to delete firecracker socket")
+			return nil, err
+		}
+
+		if err := os.RemoveAll(s.shimDir.FirecrackerVSockPath()); err != nil {
+			s.logger.WithError(err).Error("Failed to delete firecracker vsock")
+			return nil, err
+		}
+
+		if err := os.RemoveAll(s.shimDir.FirecrackerUPFSockPath()); err != nil {
+			s.logger.WithError(err).Error("Failed to delete firecracker UPF socket")
+			return nil, err
+		}
+
+		if err := s.cleanup(); err != nil {
+			s.logger.WithError(err).Error("failed to clean up the VM")
+		}
 	}
+
 	return &empty.Empty{}, nil
 }
 
@@ -2134,6 +2162,7 @@ func (s *service) SendCreateSnapRequest(createSnapReq *http.Request) error {
 
 // Offload Shuts down a VM and deletes the corresponding firecracker socket
 // and vsock. All of the other resources will persist
+// Depracated, don't use
 func (s *service) Offload(ctx context.Context, req *proto.OffloadRequest) (*empty.Empty, error) {
 
 	if !s.snapLoaded {
