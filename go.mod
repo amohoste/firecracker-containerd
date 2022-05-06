@@ -1,47 +1,40 @@
 module github.com/firecracker-microvm/firecracker-containerd
 
+go 1.16
+
 require (
-	github.com/Microsoft/go-winio v0.5.0 // indirect
 	github.com/StackExchange/wmi v0.0.0-20181212234831-e0a55b97c705 // indirect
-	github.com/awslabs/tc-redirect-tap v0.0.0-20200708224642-a0300978797d
-	github.com/bits-and-blooms/bitset v1.2.1 // indirect
-	github.com/containerd/containerd v1.5.8
-	github.com/containerd/continuity v0.2.0 // indirect
+	github.com/awslabs/tc-redirect-tap v0.0.0-20211025175357-e30dfca224c2
+	github.com/containerd/containerd v1.6.3
+	github.com/containerd/continuity v0.2.2
 	github.com/containerd/fifo v1.0.0
 	github.com/containerd/go-runc v1.0.0
 	github.com/containerd/ttrpc v1.1.0
 	github.com/containerd/typeurl v1.0.2
-	github.com/containernetworking/cni v0.8.1
-	github.com/containernetworking/plugins v0.9.1
-	github.com/firecracker-microvm/firecracker-go-sdk v0.22.1-0.20210520223842-abd0815b8bf9
+	github.com/containernetworking/cni v1.0.1
+	github.com/containernetworking/plugins v1.1.1
+	github.com/firecracker-microvm/firecracker-go-sdk v0.22.1-0.20220427214706-47505a9cf951
 	github.com/go-ole/go-ole v1.2.4 // indirect
 	github.com/gofrs/uuid v3.3.0+incompatible
-	github.com/gogo/googleapis v1.4.1 // indirect
 	github.com/gogo/protobuf v1.3.2
-	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
-	github.com/golang/protobuf v1.5.2
-	github.com/google/uuid v1.3.0 // indirect
-	github.com/hashicorp/go-multierror v1.1.0
-	github.com/klauspost/compress v1.13.6 // indirect
-	github.com/mdlayher/vsock v0.0.0-20190329173812-a92c53d5dcab
+	github.com/hashicorp/go-multierror v1.1.1
 	github.com/miekg/dns v1.1.25
-	github.com/opencontainers/runc v1.0.2
+	github.com/opencontainers/image-spec v1.0.3-0.20211202183452-c5a74bcca799
+	github.com/opencontainers/runc v1.1.1
 	github.com/opencontainers/runtime-spec v1.0.3-0.20210910115017-0d6cc581aeea
-	github.com/opencontainers/selinux v1.8.5 // indirect
+	github.com/pelletier/go-toml v1.9.3
 	github.com/pkg/errors v0.9.1
 	github.com/shirou/gopsutil v2.18.12+incompatible
 	github.com/shirou/w32 v0.0.0-20160930032740-bb4de0191aa4 // indirect
 	github.com/sirupsen/logrus v1.8.1
-	github.com/stretchr/testify v1.6.1
 	github.com/tv42/httpunix v0.0.0-20191220191345-2ba4b9c3382c
-	github.com/vishvananda/netlink v1.1.1-0.20201029203352-d40f9887b852
 	go.opencensus.io v0.23.0 // indirect
 	golang.org/x/net v0.0.0-20211005001312-d4b1ae081e3b // indirect
+	github.com/stretchr/testify v1.7.1
+	github.com/vishvananda/netlink v1.1.1-0.20210330154013-f5de75959ad5
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
-	golang.org/x/sys v0.0.0-20211004093028-2c5d950f24ef
-	golang.org/x/text v0.3.7 // indirect
-	google.golang.org/genproto v0.0.0-20211005153810-c76a74d43a8e // indirect
-	google.golang.org/grpc v1.41.0
+	golang.org/x/sys v0.0.0-20220209214540-3681064d5158
+	google.golang.org/grpc v1.43.0
 )
 
 replace (
@@ -56,7 +49,5 @@ replace (
 
 	// Pin gPRC-related dependencies as like containerd v1.5.x.
 	google.golang.org/genproto => google.golang.org/genproto v0.0.0-20200224152610-e50cd9704f63
-	google.golang.org/grpc => google.golang.org/grpc v1.27.1
+	google.golang.org/grpc => google.golang.org/grpc v1.38.1
 )
-
-go 1.11

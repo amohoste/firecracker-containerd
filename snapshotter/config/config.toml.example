@@ -1,0 +1,17 @@
+[snapshotter.listener]
+  type = "unix"
+  address = "/var/lib/demux-snapshotter/snapshotter.sock"
+
+[snapshotter.proxy.address.resolver]
+  type = "http"
+  address = "127.0.0.1:10001"
+
+[snapshotter.metrics]
+  enable = true
+  port_range = "9000-9999"
+  [snapshotter.metrics.service_discovery]
+    enable = true
+    port = 8080
+
+[debug]
+  logLevel = "info"

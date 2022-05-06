@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +46,7 @@ import (
 	"github.com/shirou/gopsutil/process"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/firecracker-microvm/firecracker-containerd/config"
 	_ "github.com/firecracker-microvm/firecracker-containerd/firecracker-control"
@@ -68,6 +70,8 @@ const (
 	defaultVMNetDevName = "eth0"
 	numberOfVmsEnvName  = "NUMBER_OF_VMS"
 	defaultNumberOfVms  = 5
+
+	tapPrefixEnvName = "TAP_PREFIX"
 
 	defaultBalloonMemory         = int64(66)
 	defaultStatsPollingIntervals = int64(1)
@@ -221,34 +225,37 @@ func vmIDtoMacAddr(vmID uint) string {
 	return strings.Join(addrParts, ":")
 }
 
-func deleteTapDevice(ctx context.Context, tapName string) error {
-	if err := exec.CommandContext(ctx, "ip", "link", "delete", tapName).Run(); err != nil {
-		return err
+func ipCommand(ctx context.Context, args ...string) error {
+	out, err := exec.CommandContext(ctx, "ip", args...).CombinedOutput()
+	if err != nil {
+		s := strings.Trim(string(out), "\n")
+		return fmt.Errorf("failed to execute ip %s: %s: %w", strings.Join(args, " "), s, err)
 	}
-
-	if err := exec.CommandContext(ctx, "ip", "tuntap", "del", tapName, "mode", "tap").Run(); err != nil {
-		return err
-	}
-
 	return nil
 }
 
+func deleteTapDevice(ctx context.Context, tapName string) error {
+	if err := ipCommand(ctx, "link", "delete", tapName); err != nil {
+		return err
+	}
+	return ipCommand(ctx, "tuntap", "del", tapName, "mode", "tap")
+}
+
 func createTapDevice(ctx context.Context, tapName string) error {
-	err := exec.CommandContext(ctx, "ip", "tuntap", "add", tapName, "mode", "tap").Run()
-	if err != nil {
-		return errors.Wrapf(err, "failed to create tap device %s", tapName)
+	if err := ipCommand(ctx, "tuntap", "add", tapName, "mode", "tap"); err != nil {
+		return err
 	}
-
-	err = exec.CommandContext(ctx, "ip", "link", "set", tapName, "up").Run()
-	if err != nil {
-		return errors.Wrapf(err, "failed to up tap device %s", tapName)
-	}
-
-	return nil
+	return ipCommand(ctx, "link", "set", tapName, "up")
 }
 
 func TestMultipleVMs_Isolated(t *testing.T) {
 	prepareIntegTest(t)
+
+	// This test starts multiple VMs and some may hit firecracker-containerd's
+	// default timeout. So overriding the timeout to wait longer.
+	// One hour should be enough to start a VM, regardless of the load of
+	// the underlying host.
+	const createVMTimeout = time.Hour
 
 	netns, err := ns.GetCurrentNS()
 	require.NoError(t, err, "failed to get a namespace")
@@ -260,6 +267,8 @@ func TestMultipleVMs_Isolated(t *testing.T) {
 		require.NoError(t, err, "failed to get NUMBER_OF_VMS env")
 	}
 	t.Logf("TestMultipleVMs_Isolated: will run %d vm's", numberOfVms)
+
+	tapPrefix := os.Getenv(tapPrefixEnvName)
 
 	cases := []struct {
 		MaxContainers int32
@@ -287,19 +296,14 @@ func TestMultipleVMs_Isolated(t *testing.T) {
 		},
 	}
 
-	testTimeout := 10 * time.Minute
-	ctx, cancel := context.WithTimeout(namespaces.WithNamespace(context.Background(), defaultNamespace), testTimeout)
-	defer cancel()
+	testCtx := namespaces.WithNamespace(context.Background(), defaultNamespace)
 
 	client, err := containerd.New(containerdSockPath, containerd.WithDefaultRuntime(firecrackerRuntime))
 	require.NoError(t, err, "unable to create client to containerd service at %s, is containerd running?", containerdSockPath)
 	defer client.Close()
 
-	image, err := alpineImage(ctx, client, defaultSnapshotterName)
+	image, err := alpineImage(testCtx, client, defaultSnapshotterName)
 	require.NoError(t, err, "failed to get alpine image")
-
-	fcClient, err := newFCControlClient(containerdSockPath)
-	require.NoError(t, err, "failed to create fccontrol client")
 
 	cfg, err := config.LoadConfig("")
 	require.NoError(t, err, "failed to load config")
@@ -307,19 +311,22 @@ func TestMultipleVMs_Isolated(t *testing.T) {
 	// This test spawns separate VMs in parallel and ensures containers are spawned within each expected VM. It asserts each
 	// container ends up in the right VM by assigning each VM a network device with a unique mac address and having each container
 	// print the mac address it sees inside its VM.
-	var vmWg sync.WaitGroup
+	vmEg, vmEgCtx := errgroup.WithContext(testCtx)
 	for i := 0; i < numberOfVms; i++ {
 		caseTypeNumber := i % len(cases)
+		vmID := i
 		c := cases[caseTypeNumber]
-		vmWg.Add(1)
-		go func(vmID int, containerCount int32, jailerConfig *proto.JailerConfig) {
-			defer vmWg.Done()
 
-			tapName := fmt.Sprintf("tap%d", vmID)
+		f := func(ctx context.Context) error {
+			containerCount := c.MaxContainers
+			jailerConfig := c.JailerConfig
+
+			tapName := fmt.Sprintf("%stap%d", tapPrefix, vmID)
 			err := createTapDevice(ctx, tapName)
+			if err != nil {
+				return err
+			}
 			defer deleteTapDevice(ctx, tapName)
-
-			require.NoError(t, err, "failed to create tap device for vm %d", vmID)
 
 			rootfsPath := cfg.RootDrive
 
@@ -340,51 +347,76 @@ func TestMultipleVMs_Isolated(t *testing.T) {
 				},
 				ContainerCount: containerCount,
 				JailerConfig:   jailerConfig,
+				TimeoutSeconds: uint32(createVMTimeout / time.Second),
 				// In tests, our in-VM agent has Go's race detector,
 				// which makes the agent resource-hoggy than its production build
 				// So the default VM size (128MB) is too small.
 				MachineCfg: &proto.FirecrackerMachineConfiguration{MemSizeMib: 1024},
-				// Because this test starts multiple VMs in parallel, some of them may not start within
-				// the default timeout (20 seconds).
-				TimeoutSeconds: 60,
 			}
 
-			resp, err := fcClient.CreateVM(ctx, req)
-			require.NoError(t, err, "failed to create vm")
+			fcClient, err := newFCControlClient(containerdSockPath)
+			if err != nil {
+				return err
+			}
 
-			var containerWg sync.WaitGroup
+			resp, createVMErr := fcClient.CreateVM(ctx, req)
+			if createVMErr != nil {
+				matches, err := findProcess(ctx, findFirecracker)
+				if err != nil {
+					return fmt.Errorf(
+						"failed to create a VM and couldn't find Firecracker due to %s: %w",
+						createVMErr, err,
+					)
+				}
+				return fmt.Errorf(
+					"failed to create a VM while there are %d Firecracker processes: %w",
+					len(matches),
+					createVMErr,
+				)
+			}
+
+			containerEg, containerCtx := errgroup.WithContext(vmEgCtx)
 			for containerID := 0; containerID < int(containerCount); containerID++ {
-				containerWg.Add(1)
-				go func(containerID int) {
-					defer containerWg.Done()
-					testMultipleExecs(
-						ctx,
-						t,
+				containerID := containerID
+				containerEg.Go(func() error {
+					return testMultipleExecs(
+						containerCtx,
 						vmID,
 						containerID,
 						client, image,
 						jailerConfig,
 						resp.CgroupPath,
 					)
-				}(containerID)
+				})
 			}
 
 			// verify duplicate CreateVM call fails with right error
 			_, err = fcClient.CreateVM(ctx, &proto.CreateVMRequest{VMID: strconv.Itoa(vmID)})
-			require.Error(t, err, "did not receive expected error for duplicate CreateVM call")
+			if err == nil {
+				return fmt.Errorf("creating the same VM must return an error")
+			}
 
 			// verify GetVMInfo returns expected data
 			vmInfoResp, err := fcClient.GetVMInfo(ctx, &proto.GetVMInfoRequest{VMID: strconv.Itoa(vmID)})
-			require.NoError(t, err, "failed to get VM Info for VM %d", vmID)
-			require.Equal(t, vmInfoResp.VMID, strconv.Itoa(vmID))
+			if err != nil {
+				return err
+			}
+			if vmInfoResp.VMID != strconv.Itoa(vmID) {
+				return fmt.Errorf("%q must be %q", vmInfoResp.VMID, strconv.Itoa(vmID))
+			}
 
 			nspVMid := defaultNamespace + "#" + strconv.Itoa(vmID)
 			cfg, err := config.LoadConfig("")
-			require.NoError(t, err, "failed to load config")
-			require.Equal(t, vmInfoResp.SocketPath, filepath.Join(cfg.ShimBaseDir, nspVMid, "firecracker.sock"))
-			require.Equal(t, vmInfoResp.LogFifoPath, filepath.Join(cfg.ShimBaseDir, nspVMid, "fc-logs.fifo"))
-			require.Equal(t, vmInfoResp.MetricsFifoPath, filepath.Join(cfg.ShimBaseDir, nspVMid, "fc-metrics.fifo"))
-			require.Equal(t, resp.CgroupPath, vmInfoResp.CgroupPath)
+			if err != nil {
+				return err
+			}
+			if vmInfoResp.SocketPath != filepath.Join(cfg.ShimBaseDir, nspVMid, "firecracker.sock") ||
+				vmInfoResp.VSockPath != filepath.Join(cfg.ShimBaseDir, nspVMid, "firecracker.vsock") ||
+				vmInfoResp.LogFifoPath != filepath.Join(cfg.ShimBaseDir, nspVMid, "fc-logs.fifo") ||
+				vmInfoResp.MetricsFifoPath != filepath.Join(cfg.ShimBaseDir, nspVMid, "fc-metrics.fifo") ||
+				resp.CgroupPath != vmInfoResp.CgroupPath {
+				return fmt.Errorf("unexpected result from GetVMInfo: %+v", vmInfoResp)
+			}
 
 			// just verify that updating the metadata doesn't return an error, a separate test case is needed
 			// to very the MMDS update propagates to the container correctly
@@ -392,28 +424,44 @@ func TestMultipleVMs_Isolated(t *testing.T) {
 				VMID:     strconv.Itoa(vmID),
 				Metadata: "{}",
 			})
-			require.NoError(t, err, "failed to set VM Metadata for VM %d", vmID)
+			if err != nil {
+				return err
+			}
 
-			containerWg.Wait()
+			err = containerEg.Wait()
+			if err != nil {
+				return fmt.Errorf("unexpected error from the containers in VM %d: %w", vmID, err)
+			}
 
 			_, err = fcClient.StopVM(ctx, &proto.StopVMRequest{VMID: strconv.Itoa(vmID), TimeoutSeconds: 5})
-			require.NoError(t, err, "failed to stop VM %d", vmID)
-		}(i, c.MaxContainers, c.JailerConfig)
+			if err != nil {
+				return err
+			}
+			return nil
+		}
+
+		vmEg.Go(func() error {
+			err := f(vmEgCtx)
+			if err != nil {
+				return fmt.Errorf("unexpected errors from VM %d: %w", vmID, err)
+			}
+			return nil
+		})
 	}
 
-	vmWg.Wait()
+	err = vmEg.Wait()
+	require.NoError(t, err)
 }
 
 func testMultipleExecs(
 	ctx context.Context,
-	t *testing.T,
 	vmID int,
 	containerID int,
 	client *containerd.Client,
 	image containerd.Image,
 	jailerConfig *proto.JailerConfig,
 	cgroupPath string,
-) {
+) error {
 	vmIDStr := strconv.Itoa(vmID)
 	testTimeout := 600 * time.Second
 
@@ -436,7 +484,9 @@ func testMultipleExecs(
 			firecrackeroci.WithVMID(vmIDStr),
 		),
 	)
-	require.NoError(t, err, "failed to create container %s", containerName)
+	if err != nil {
+		return err
+	}
 	defer newContainer.Delete(ctx)
 
 	var taskStdout bytes.Buffer
@@ -444,13 +494,19 @@ func testMultipleExecs(
 
 	newTask, err := newContainer.NewTask(ctx,
 		cio.NewCreator(cio.WithStreams(nil, &taskStdout, &taskStderr)))
-	require.NoError(t, err, "failed to create task for container %s", containerName)
+	if err != nil {
+		return err
+	}
 
 	taskExitCh, err := newTask.Wait(ctx)
-	require.NoError(t, err, "failed to wait on task for container %s", containerName)
+	if err != nil {
+		return err
+	}
 
 	err = newTask.Start(ctx)
-	require.NoError(t, err, "failed to start task for container %s", containerName)
+	if err != nil {
+		return err
+	}
 
 	// Create a few execs for the task, including one with the same ID as the taskID (to provide
 	// regression coverage for a bug related to using the same task and exec ID).
@@ -463,20 +519,29 @@ func testMultipleExecs(
 	// This is a rudimentary way of asserting that each exec was created in the expected task.
 	execIDs := []string{fmt.Sprintf("exec-%d-%d", vmID, containerID), containerName}
 	execStdouts := make(chan string, len(execIDs))
-	var execWg sync.WaitGroup
+	var eg, _ = errgroup.WithContext(ctx)
 	for _, execID := range execIDs {
-		execWg.Add(1)
-		go func(execID string) {
-			defer execWg.Done()
-			execStdouts <- getMountNamespace(ctx, t, client, containerName, newTask, execID)
-		}(execID)
+		execID := execID
+		eg.Go(func() error {
+			ns, err := getMountNamespace(ctx, client, containerName, newTask, execID)
+			if err != nil {
+				return err
+			}
+			execStdouts <- ns
+			return nil
+		})
 	}
-	execWg.Wait()
+	err = eg.Wait()
+	if err != nil {
+		return fmt.Errorf("unexpected error from the execs in container %d: %w", containerID, err)
+	}
 	close(execStdouts)
 
 	if jailerConfig != nil {
 		dir, err := vm.ShimDir(shimBaseDir(), "default", vmIDStr)
-		require.NoError(t, err)
+		if err != nil {
+			return err
+		}
 
 		jailer := &runcJailer{
 			Config: runcJailerConfig{
@@ -485,10 +550,21 @@ func testMultipleExecs(
 			vmID: vmIDStr,
 		}
 		_, err = os.Stat(jailer.RootPath())
-		require.NoError(t, err, "failed to stat root path of jailer")
+		if err != nil {
+			return err
+		}
 		_, err = os.Stat(filepath.Join("/sys/fs/cgroup/cpu", cgroupPath))
-		require.NoError(t, err, "failed to stat cgroup path of jailer")
-		assert.Regexp(t, fmt.Sprintf(".+/%s", vmIDStr), cgroupPath)
+		if err != nil {
+			return err
+		}
+
+		ok, err := regexp.Match(".+/"+vmIDStr, []byte(cgroupPath))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%q doesn't match %q", cgroupPath, vmIDStr)
+		}
 	}
 
 	// Verify each exec had the same stdout and use that value as the mount namespace that will be compared
@@ -500,18 +576,23 @@ func testMultipleExecs(
 			// in the execID loop above.
 			execMntNS = execStdout
 		}
-
-		require.Equal(t, execMntNS, execStdout, "execs in same task unexpectedly have different outputs")
+		if execStdout != execMntNS {
+			return fmt.Errorf("%q must be %q", execStdout, execMntNS)
+		}
 	}
 
 	// Now kill the task and verify it was in the right VM and has the same mnt namespace as its execs
 	err = newTask.Kill(ctx, syscall.SIGKILL)
-	require.NoError(t, err, "failed to kill task %q", containerName)
+	if err != nil {
+		return err
+	}
 
 	select {
 	case <-taskExitCh:
 		_, err = newTask.Delete(ctx)
-		require.NoError(t, err, "failed to delete task %q", containerName)
+		if err != nil {
+			return err
+		}
 
 		// if there was anything on stderr, print it to assist debugging
 		stderrOutput := taskStderr.String()
@@ -519,23 +600,20 @@ func testMultipleExecs(
 			fmt.Printf("stderr output from task %q: %q", containerName, stderrOutput)
 		}
 
-		stdoutLines := strings.Split(strings.TrimSpace(taskStdout.String()), "\n")
-		lines := 2
-		require.Len(t, stdoutLines, lines)
+		stdout := taskStdout.String()
+		expected := fmt.Sprintf("%s\n%s\n", vmIDtoMacAddr(uint(vmID)), execMntNS)
 
-		printedVMID := strings.TrimSpace(stdoutLines[0])
-		require.Equal(t, vmIDtoMacAddr(uint(vmID)), printedVMID, "unexpected VMID output from container %q", containerName)
-
-		taskMntNS := strings.TrimSpace(stdoutLines[1])
-		require.Equal(t, execMntNS, taskMntNS, "unexpected mnt NS output from container %q", containerName)
-
+		if stdout != expected {
+			return fmt.Errorf("%q must be %q", stdout, expected)
+		}
 	case <-ctx.Done():
-		require.Fail(t, "context cancelled",
-			"context cancelled while waiting for container %s to exit, err: %v", containerName, ctx.Err())
+		return ctx.Err()
 	}
+
+	return nil
 }
 
-func getMountNamespace(ctx context.Context, t *testing.T, client *containerd.Client, containerName string, newTask containerd.Task, execID string) string {
+func getMountNamespace(ctx context.Context, client *containerd.Client, containerName string, newTask containerd.Task, execID string) (string, error) {
 	var execStdout bytes.Buffer
 	var execStderr bytes.Buffer
 
@@ -543,18 +621,26 @@ func getMountNamespace(ctx context.Context, t *testing.T, client *containerd.Cli
 		Args: []string{"/usr/bin/readlink", "/proc/self/ns/mnt"},
 		Cwd:  "/",
 	}, cio.NewCreator(cio.WithStreams(nil, &execStdout, &execStderr)))
-	require.NoError(t, err, "failed to exec %s", execID)
+	if err != nil {
+		return "", err
+	}
 
 	execExitCh, err := newExec.Wait(ctx)
-	require.NoError(t, err, "failed to wait on exec %s", execID)
+	if err != nil {
+		return "", err
+	}
 
 	err = newExec.Start(ctx)
-	require.NoError(t, err, "failed to start exec %s", execID)
+	if err != nil {
+		return "", err
+	}
 
 	select {
 	case exitStatus := <-execExitCh:
 		_, err = newExec.Delete(ctx)
-		require.NoError(t, err, "failed to delete exec %q", execID)
+		if err != nil {
+			return "", err
+		}
 
 		// if there was anything on stderr, print it to assist debugging
 		stderrOutput := execStderr.String()
@@ -563,16 +649,15 @@ func getMountNamespace(ctx context.Context, t *testing.T, client *containerd.Cli
 		}
 
 		mntNS := strings.TrimSpace(execStdout.String())
-		require.NotEmptyf(t, mntNS, "no stdout output for task %q exec %q", containerName, execID)
+		code := exitStatus.ExitCode()
+		if code != 0 {
+			return "", fmt.Errorf("exit code %d != 0, stdout=%q stderr=%q", code, execStdout.String(), stderrOutput)
+		}
 
-		require.Equal(t, uint32(0), exitStatus.ExitCode())
-
-		return mntNS
+		return mntNS, nil
 	case <-ctx.Done():
-		require.Fail(t, "context cancelled",
-			"context cancelled while waiting for exec %s to exit, err: %v", execID, ctx.Err())
+		return "", ctx.Err()
 	}
-	return ""
 }
 
 func TestLongUnixSocketPath_Isolated(t *testing.T) {
@@ -980,6 +1065,7 @@ func TestDriveMount_Isolated(t *testing.T) {
 		FSImgFile      internal.FSImgFile
 		IsWritable     bool
 		RateLimiter    *proto.FirecrackerRateLimiter
+		CacheType      string
 	}{
 		{
 			// /systemmount meant to make sure logic doesn't ban this just because it begins with /sys
@@ -1004,6 +1090,7 @@ func TestDriveMount_Isolated(t *testing.T) {
 				},
 			},
 			IsWritable: true,
+			CacheType:  "Writeback",
 		},
 		{
 			VMPath:         "/mnt",
@@ -1033,6 +1120,7 @@ func TestDriveMount_Isolated(t *testing.T) {
 			Options:        vmMount.VMMountOptions,
 			IsWritable:     vmMount.IsWritable,
 			RateLimiter:    vmMount.RateLimiter,
+			CacheType:      vmMount.CacheType,
 		})
 
 		ctrBindMounts = append(ctrBindMounts, specs.Mount{
@@ -1170,6 +1258,13 @@ func TestDriveMountFails_Isolated(t *testing.T) {
 			FilesystemType: "ext4",
 			// invalid due to "rw" option used with IsWritable=false
 			Options: []string{"rw"},
+		},
+		{
+			HostPath:       testImgHostPath,
+			VMPath:         "/valid",
+			FilesystemType: "ext4",
+			// invalid since cacheType expects either "Unsafe" or "Writeback"
+			CacheType: "invalid-cache-type",
 		},
 	} {
 		_, err = fcClient.CreateVM(ctx, &proto.CreateVMRequest{
@@ -1517,6 +1612,10 @@ func findProcess(
 	return matches, nil
 }
 
+func pidExists(pid int) bool {
+	return syscall.ESRCH.Is(syscall.Kill(pid, 0))
+}
+
 func TestStopVM_Isolated(t *testing.T) {
 	prepareIntegTest(t)
 	require := require.New(t)
@@ -1562,15 +1661,9 @@ func TestStopVM_Isolated(t *testing.T) {
 			},
 			stopFunc: func(ctx context.Context, fcClient fccontrol.FirecrackerService, req proto.CreateVMRequest) {
 				_, err = fcClient.StopVM(ctx, &proto.StopVMRequest{VMID: req.VMID})
-				errCode := status.Code(err)
-				assert.Equal(codes.Internal, errCode, "the error code must be Internal")
-
-				if req.JailerConfig != nil {
-					// No "signal: ..." error with runc since it traps the signal
-					assert.Contains(err.Error(), "exit status 1")
-				} else {
-					assert.Contains(err.Error(), "signal: terminated", "must be 'terminated', not 'killed'")
-				}
+				require.Error(err)
+				assert.Equal(codes.Internal, status.Code(err))
+				assert.Contains(err.Error(), "forcefully terminated")
 			},
 		},
 
@@ -1619,12 +1712,10 @@ func TestStopVM_Isolated(t *testing.T) {
 					TimeoutSeconds: 10,
 				})
 
-				if req.JailerConfig != nil {
-					// No "signal: ..." error with runc since it traps the signal
-					assert.Contains(err.Error(), "exit status 137")
-				} else {
-					assert.Contains(err.Error(), "signal: killed")
-				}
+				require.Error(err)
+				assert.Equal(codes.Internal, status.Code(err))
+				// This is technically not accurate (the test is terminating the VM) though.
+				assert.Contains(err.Error(), "forcefully terminated")
 			},
 		},
 
@@ -1640,7 +1731,30 @@ func TestStopVM_Isolated(t *testing.T) {
 				require.Equal(status.Code(err), codes.OK)
 
 				_, err = fcClient.StopVM(ctx, &proto.StopVMRequest{VMID: req.VMID})
-				require.NoError(err)
+				require.Error(err)
+				assert.Equal(codes.Internal, status.Code(err))
+				assert.Contains(err.Error(), "forcefully terminated")
+			},
+		},
+
+		{
+			name:       "Suspend",
+			withStopVM: true,
+
+			createVMRequest: proto.CreateVMRequest{},
+			stopFunc: func(ctx context.Context, fcClient fccontrol.FirecrackerService, req proto.CreateVMRequest) {
+				firecrackerProcesses, err := findProcess(ctx, findFirecracker)
+				require.NoError(err, "failed waiting for expected firecracker process %q to come up", firecrackerProcessName)
+				require.Len(firecrackerProcesses, 1, "expected only one firecracker process to exist")
+				firecrackerProcess := firecrackerProcesses[0]
+
+				err = firecrackerProcess.Suspend()
+				require.NoError(err, "failed to suspend Firecracker")
+
+				_, err = fcClient.StopVM(ctx, &proto.StopVMRequest{VMID: req.VMID})
+				require.Error(err)
+				assert.Equal(codes.Internal, status.Code(err))
+				assert.Contains(err.Error(), "forcefully terminated")
 			},
 		},
 	}
@@ -1686,13 +1800,13 @@ func TestStopVM_Isolated(t *testing.T) {
 			// If the function above uses StopVMRequest, all underlying processes must be dead
 			// (either gracefully or forcibly) at the end of the request.
 			if test.withStopVM {
-				fcExists, err := process.PidExists(fcProcess.Pid)
-				require.NoError(err, "failed to find firecracker")
-				require.False(fcExists, "firecracker %s is still there", vmID)
+				fcExists := pidExists(int(fcProcess.Pid))
+				assert.NoError(err, "failed to find firecracker")
+				assert.False(fcExists, "firecracker %s (pid=%d) is still there", vmID, fcProcess.Pid)
 
-				shimExists, err := process.PidExists(shimProcess.Pid)
-				require.NoError(err, "failed to find shim")
-				require.False(shimExists, "shim %s is still there", vmID)
+				shimExists := pidExists(int(shimProcess.Pid))
+				assert.NoError(err, "failed to find shim")
+				assert.False(shimExists, "shim %s (pid=%d) is still there", vmID, shimProcess.Pid)
 			}
 
 			err = internal.WaitForPidToExit(ctx, time.Second, shimProcess.Pid)
@@ -1906,6 +2020,12 @@ func findProcWithName(name string) func(context.Context, *process.Process) (bool
 	return func(ctx context.Context, p *process.Process) (bool, error) {
 		processExecutable, err := p.ExeWithContext(ctx)
 		if err != nil {
+			// The call above reads /proc filesystem.
+			// If the process is died before reading the filesystem,
+			// the call would return ENOENT and that's fine.
+			if os.IsNotExist(err) {
+				return false, nil
+			}
 			return false, err
 		}
 
@@ -1943,8 +2063,8 @@ func TestOOM_Isolated(t *testing.T) {
 		containerd.WithSnapshotter(defaultSnapshotterName),
 		containerd.WithNewSnapshot("snapshot-"+vmID, image),
 		containerd.WithNewSpec(
-			// The container is having 2MB of memory.
-			oci.WithMemoryLimit(2*1024*1024),
+			// The container is having 3MB of memory.
+			oci.WithMemoryLimit(3*1024*1024),
 			// But the dd command allocates 10MB of data on memory, which will be OOM killed.
 			oci.WithProcessArgs("/bin/dd", "if=/dev/zero", "ibs=10M", "of=/dev/null"),
 			firecrackeroci.WithVMID(vmID),
@@ -2089,9 +2209,7 @@ func TestCreateVM_Isolated(t *testing.T) {
 		}
 		vmID := testNameToVMID(t.Name())
 
-		tempDir, err := ioutil.TempDir("", vmID)
-		require.NoError(t, err)
-		defer os.RemoveAll(tempDir)
+		tempDir := t.TempDir()
 
 		logFile := filepath.Join(tempDir, "log.fifo")
 		metricsFile := filepath.Join(tempDir, "metrics.fifo")
@@ -2113,7 +2231,7 @@ func TestCreateVM_Isolated(t *testing.T) {
 			// Ensure the response fields are populated correctly
 			assert.Equal(t, request.VMID, resp.VMID)
 
-			_, err = fcClient.StopVM(ctx, &proto.StopVMRequest{VMID: request.VMID})
+			_, err := fcClient.StopVM(ctx, &proto.StopVMRequest{VMID: request.VMID})
 			require.Equal(t, status.Code(err), codes.OK)
 		}
 	}
@@ -2211,9 +2329,7 @@ func TestPauseResume_Isolated(t *testing.T) {
 	runTest := func(t *testing.T, request *proto.CreateVMRequest, state func(ctx context.Context, resp *proto.CreateVMResponse)) {
 		vmID := testNameToVMID(t.Name())
 
-		tempDir, err := ioutil.TempDir("", vmID)
-		require.NoError(t, err)
-		defer os.RemoveAll(tempDir)
+		tempDir := t.TempDir()
 
 		logFile := filepath.Join(tempDir, "log.fifo")
 		metricsFile := filepath.Join(tempDir, "metrics.fifo")
@@ -2239,8 +2355,12 @@ func TestPauseResume_Isolated(t *testing.T) {
 		// Ensure the response fields are populated correctly
 		assert.Equal(t, request.VMID, resp.VMID)
 
-		_, err = fcClient.StopVM(ctx, &proto.StopVMRequest{VMID: request.VMID})
-		require.Equal(t, status.Code(err), codes.OK)
+		// Resume the VM since state() may pause the VM.
+		_, err := fcClient.ResumeVM(ctx, &proto.ResumeVMRequest{VMID: vmID})
+		require.NoError(t, err)
+
+		_, err = fcClient.StopVM(ctx, &proto.StopVMRequest{VMID: vmID})
+		require.NoError(t, err)
 	}
 
 	for _, subtest := range subtests {

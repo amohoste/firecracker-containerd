@@ -38,7 +38,6 @@ import (
 
 	"github.com/containerd/containerd/api/types/task"
 	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/events/exchange"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/namespaces"
@@ -50,9 +49,9 @@ import (
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
+	"github.com/firecracker-microvm/firecracker-go-sdk/vsock"
 	"github.com/gofrs/uuid"
-	ptypes "github.com/gogo/protobuf/types"
-	"github.com/golang/protobuf/ptypes/empty"
+	"github.com/gogo/protobuf/types"
 	"github.com/hashicorp/go-multierror"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -433,13 +432,13 @@ func logPanicAndDie(logger *logrus.Entry) {
 	}
 }
 
-func (s *service) generateExtraData(jsonBytes []byte, options *ptypes.Any) (*proto.ExtraData, error) {
-	var opts *ptypes.Any
+func (s *service) generateExtraData(jsonBytes []byte, options *types.Any) (*proto.ExtraData, error) {
+	var opts *types.Any
 	if options != nil {
 		// Copy values of existing options over
 		valCopy := make([]byte, len(options.Value))
 		copy(valCopy, options.Value)
-		opts = &ptypes.Any{
+		opts = &types.Any{
 			TypeUrl: options.TypeUrl,
 			Value:   valCopy,
 		}
@@ -640,7 +639,7 @@ func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRe
 	}
 
 	s.logger.Info("calling agent")
-	conn, err := vm.VSockDial(requestCtx, s.logger, relVSockPath, defaultVsockPort)
+	conn, err := vsock.DialContext(requestCtx, relVSockPath, defaultVsockPort, vsock.WithLogger(s.logger))
 	if err != nil {
 		return errors.Wrapf(err, "failed to dial the VM over vsock")
 	}
@@ -701,7 +700,7 @@ func (s *service) mountDrives(requestCtx context.Context) error {
 // If the VM has not been created yet and the timeout is hit waiting for it to exist, an error will be returned
 // but the shim will continue to shutdown. Similarly if we detect that the VM is in pause state, then
 // we are unable to communicate to the in-VM agent. In this case, we do a forceful shutdown.
-func (s *service) StopVM(requestCtx context.Context, request *proto.StopVMRequest) (_ *empty.Empty, err error) {
+func (s *service) StopVM(requestCtx context.Context, request *proto.StopVMRequest) (_ *types.Empty, err error) {
 	defer logPanicAndDie(s.logger)
 	s.logger.WithFields(logrus.Fields{"timeout_seconds": request.TimeoutSeconds}).Debug("StopVM")
 
@@ -710,28 +709,18 @@ func (s *service) StopVM(requestCtx context.Context, request *proto.StopVMReques
 		timeout = time.Duration(request.TimeoutSeconds) * time.Second
 	}
 
-	// TODO: this addition from fccd v0.25 causes crashes when stopping snapshotted vm
-	/*info, err := s.machine.DescribeInstanceInfo(requestCtx)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get instance info %v", info)
-	}
-
-	if *info.State == models.InstanceInfoStatePaused {
-		s.logger.Debug("Instance is in Paused state, force shutdown in progress")
-		err = s.jailer.Stop(true)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to stop VM in paused State")
-		}
-		return &empty.Empty{}, nil
-	}*/
-
 	err = s.waitVMReady()
 	if err != nil {
 		return nil, err
 	}
 
 	if ! s.snapLoaded {
-		err = s.shutdown(requestCtx, timeout, &taskAPI.ShutdownRequest{Now: true})
+		ctx, cancel := context.WithTimeout(requestCtx, timeout)
+		defer cancel()
+
+		if err = s.terminate(ctx); err != nil {
+			return nil, err
+		}
 	} else {
 		err = s.shutdownSnapLoadedVm()
 	}
@@ -740,7 +729,60 @@ func (s *service) StopVM(requestCtx context.Context, request *proto.StopVMReques
 		return nil, err
 	}
 
-	return &empty.Empty{}, nil
+	return &types.Empty{}, nil
+}
+
+// ResumeVM Resumes a VM
+func (s *service) ResumeVM(ctx context.Context, req *proto.ResumeVMRequest) (*types.Empty, error) {
+	resumeReq, err := formResumeReq()
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to create resume vm request")
+		return nil, err
+	}
+
+	if s.networkNamespace == "" {
+		err = s.SendResumeVmRequest(resumeReq)
+	} else {
+		err = s.netNS.Do(func(_ ns.NetNS) error {
+			return s.SendResumeVmRequest(resumeReq)
+		})
+	}
+
+	if err != nil {
+		s.logger.WithError(err).Error("Resume VM failed")
+		return nil, err
+	}
+
+	return &types.Empty{}, nil
+}
+
+// PauseVM Pauses a VM
+func (s *service) PauseVM(ctx context.Context, req *proto.PauseVMRequest) (*types.Empty, error) {
+	pauseReq, err := formPauseReq()
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to create pause vm request")
+		return nil, err
+	}
+
+	err = s.waitVMReady()
+	if err != nil {
+		return nil, err
+	}
+
+	if s.networkNamespace == "" {
+		err = s.SendPauseVmRequest(pauseReq)
+	} else {
+		err = s.netNS.Do(func(_ ns.NetNS) error {
+			return s.SendPauseVmRequest(pauseReq)
+		})
+	}
+
+	if err != nil {
+		s.logger.WithError(err).Error("Pause VM failed")
+		return nil, err
+	}
+
+	return &types.Empty{}, nil
 }
 
 // shutdownSnapLoadedVm shuts down a vm that has been loaded from a snapshot
@@ -797,12 +839,13 @@ func (s *service) GetVMInfo(requestCtx context.Context, request *proto.GetVMInfo
 		LogFifoPath:     s.machineConfig.LogPath,
 		MetricsFifoPath: s.machineConfig.MetricsPath,
 		CgroupPath:      cgroupPath,
+		VSockPath:       s.shimDir.FirecrackerVSockPath(),
 	}, nil
 }
 
 // SetVMMetadata will update the VM being managed by this shim with the provided metadata. If the VM has not been created yet, this
 // method will wait for up to a hardcoded timeout for it to exist, returning an error if the timeout is reached.
-func (s *service) SetVMMetadata(requestCtx context.Context, request *proto.SetVMMetadataRequest) (*empty.Empty, error) {
+func (s *service) SetVMMetadata(requestCtx context.Context, request *proto.SetVMMetadataRequest) (*types.Empty, error) {
 	defer logPanicAndDie(s.logger)
 
 	err := s.waitVMReady()
@@ -819,13 +862,13 @@ func (s *service) SetVMMetadata(requestCtx context.Context, request *proto.SetVM
 		return nil, err
 	}
 
-	return &empty.Empty{}, nil
+	return &types.Empty{}, nil
 }
 
 // UpdateVMMetadata updates the VM being managed by this shim with the provided metadata patch.
 // If the vm has not been created yet, this method will wait for up to the hardcoded timeout for it
 // to exist, returning an error if the timeout is reached.
-func (s *service) UpdateVMMetadata(requestCtx context.Context, request *proto.UpdateVMMetadataRequest) (*empty.Empty, error) {
+func (s *service) UpdateVMMetadata(requestCtx context.Context, request *proto.UpdateVMMetadataRequest) (*types.Empty, error) {
 
 	defer logPanicAndDie(s.logger)
 
@@ -843,7 +886,7 @@ func (s *service) UpdateVMMetadata(requestCtx context.Context, request *proto.Up
 		return nil, err
 	}
 
-	return &empty.Empty{}, nil
+	return &types.Empty{}, nil
 }
 
 // GetVMMetadata returns the metadata for the vm managed by this shim..
@@ -918,7 +961,7 @@ func (s *service) GetBalloonConfig(requestCtx context.Context, req *proto.GetBal
 }
 
 // UpdateBalloon will update an existing balloon device, before or after machine startup
-func (s *service) UpdateBalloon(requestCtx context.Context, req *proto.UpdateBalloonRequest) (*empty.Empty, error) {
+func (s *service) UpdateBalloon(requestCtx context.Context, req *proto.UpdateBalloonRequest) (*types.Empty, error) {
 	defer logPanicAndDie(s.logger)
 
 	err := s.waitVMReady()
@@ -934,7 +977,7 @@ func (s *service) UpdateBalloon(requestCtx context.Context, req *proto.UpdateBal
 		return nil, err
 	}
 
-	return &empty.Empty{}, nil
+	return &types.Empty{}, nil
 }
 
 // GetBalloonStats will return the latest balloon device statistics, only if enabled pre-boot.
@@ -984,8 +1027,8 @@ func (s *service) GetBalloonStats(requestCtx context.Context, req *proto.GetBall
 	return resp, nil
 }
 
-//UpdateBalloonStats will update an existing balloon device statistics interval, before or after machine startup.
-func (s *service) UpdateBalloonStats(requestCtx context.Context, req *proto.UpdateBalloonStatsRequest) (*empty.Empty, error) {
+// UpdateBalloonStats will update an existing balloon device statistics interval, before or after machine startup.
+func (s *service) UpdateBalloonStats(requestCtx context.Context, req *proto.UpdateBalloonStatsRequest) (*types.Empty, error) {
 	defer logPanicAndDie(s.logger)
 
 	err := s.waitVMReady()
@@ -1001,7 +1044,7 @@ func (s *service) UpdateBalloonStats(requestCtx context.Context, req *proto.Upda
 		return nil, err
 	}
 
-	return &empty.Empty{}, nil
+	return &types.Empty{}, nil
 }
 
 func (s *service) buildVMConfiguration(req *proto.CreateVMRequest) (*firecracker.Config, error) {
@@ -1136,7 +1179,8 @@ func (s *service) buildRootDrive(req *proto.CreateVMRequest) []models.Drive {
 		builder = builder.WithRootDrive(input.HostPath,
 			firecracker.WithReadOnly(!input.IsWritable),
 			firecracker.WithPartuuid(input.Partuuid),
-			withRateLimiterFromProto(input.RateLimiter))
+			withRateLimiterFromProto(input.RateLimiter),
+			withCacheTypeFromProto(input.CacheType))
 	} else {
 		builder = builder.WithRootDrive(s.config.RootDrive, firecracker.WithReadOnly(true))
 	}
@@ -1260,14 +1304,18 @@ func (s *service) Create(requestCtx context.Context, request *taskAPI.CreateTask
 	}
 	rootfsMnt := request.Rootfs[0]
 
-	s.taskDrivePathOnHost = rootfsMnt.Source
+	isVMLocalRootfs := vm.IsLocalMount(rootfsMnt)
 
-	err = s.containerStubHandler.Reserve(requestCtx, request.ID,
-		rootfsMnt.Source, vmBundleDir.RootfsPath(), "ext4", nil, s.driveMountClient, s.machine)
-	if err != nil {
-		err = errors.Wrapf(err, "failed to get stub drive for task %q", request.ID)
-		logger.WithError(err).Error()
-		return nil, err
+	// Only mount the container's rootfs as a block device if the mount doesn't
+	// signal that it is only accessible from inside the VM.
+	if !isVMLocalRootfs {
+		err = s.containerStubHandler.Reserve(requestCtx, request.ID,
+			rootfsMnt.Source, vmBundleDir.RootfsPath(), "ext4", nil, s.driveMountClient, s.machine)
+		if err != nil {
+			err = errors.Wrapf(err, "failed to get stub drive for task %q", request.ID)
+			logger.WithError(err).Error()
+			return nil, err
+		}
 	}
 
 	ociConfigBytes, err := hostBundleDir.OCIConfig().Bytes()
@@ -1282,7 +1330,7 @@ func (s *service) Create(requestCtx context.Context, request *taskAPI.CreateTask
 		return nil, err
 	}
 
-	request.Options, err = ptypes.MarshalAny(extraData)
+	request.Options, err = types.MarshalAny(extraData)
 	if err != nil {
 		err = errors.Wrap(err, "failed to marshal extra data")
 		logger.WithError(err).Error()
@@ -1297,11 +1345,14 @@ func (s *service) Create(requestCtx context.Context, request *taskAPI.CreateTask
 	// override the request with the bundle dir that should be used inside the VM
 	request.Bundle = vmBundleDir.RootPath()
 
-	// The rootfs is mounted via a MountDrive call, so unset Rootfs in the request.
-	// We unfortunately can't rely on just having the runc shim inside the VM do
-	// the mount for us because we sometimes need to do mount retries due to our
-	// requirement of patching stub drives
-	request.Rootfs = nil
+	if !isVMLocalRootfs {
+		// If the rootfs is not inside the VM, it is mounted via a MountDrive call,
+		// so unset Rootfs in the request.
+		// We unfortunately can't rely on just having the runc shim inside the VM do
+		// the mount for us because we sometimes need to do mount retries due to our
+		// requirement of patching stub drives
+		request.Rootfs = nil
+	}
 
 	resp, err := s.taskManager.CreateTask(requestCtx, request, s.agentClient, ioConnectorSet)
 	if err != nil {
@@ -1381,7 +1432,7 @@ func (s *service) Delete(requestCtx context.Context, req *taskAPI.DeleteRequest)
 }
 
 // Exec an additional process inside the container
-func (s *service) Exec(requestCtx context.Context, req *taskAPI.ExecProcessRequest) (*ptypes.Empty, error) {
+func (s *service) Exec(requestCtx context.Context, req *taskAPI.ExecProcessRequest) (*types.Empty, error) {
 	defer logPanicAndDie(log.G(requestCtx))
 	logger := s.logger.WithField("task_id", req.ID).WithField("exec_id", req.ExecID)
 	logger.Debug("exec")
@@ -1394,7 +1445,7 @@ func (s *service) Exec(requestCtx context.Context, req *taskAPI.ExecProcessReque
 		return nil, err
 	}
 
-	req.Spec, err = ptypes.MarshalAny(extraData)
+	req.Spec, err = types.MarshalAny(extraData)
 	if err != nil {
 		err = errors.Wrap(err, "failed to marshal extra data")
 		logger.WithError(err).Error()
@@ -1425,7 +1476,7 @@ func (s *service) Exec(requestCtx context.Context, req *taskAPI.ExecProcessReque
 }
 
 // ResizePty of a process
-func (s *service) ResizePty(requestCtx context.Context, req *taskAPI.ResizePtyRequest) (*ptypes.Empty, error) {
+func (s *service) ResizePty(requestCtx context.Context, req *taskAPI.ResizePtyRequest) (*types.Empty, error) {
 	defer logPanicAndDie(log.G(requestCtx))
 
 	log.G(requestCtx).WithFields(logrus.Fields{"task_id": req.ID, "exec_id": req.ExecID}).Debug("resize_pty")
@@ -1517,7 +1568,7 @@ func (s *service) attachNewProxy(
 }
 
 // Pause the container
-func (s *service) Pause(requestCtx context.Context, req *taskAPI.PauseRequest) (*ptypes.Empty, error) {
+func (s *service) Pause(requestCtx context.Context, req *taskAPI.PauseRequest) (*types.Empty, error) {
 	defer logPanicAndDie(log.G(requestCtx))
 
 	log.G(requestCtx).WithField("task_id", req.ID).Debug("pause")
@@ -1530,7 +1581,7 @@ func (s *service) Pause(requestCtx context.Context, req *taskAPI.PauseRequest) (
 }
 
 // Resume the container
-func (s *service) Resume(requestCtx context.Context, req *taskAPI.ResumeRequest) (*ptypes.Empty, error) {
+func (s *service) Resume(requestCtx context.Context, req *taskAPI.ResumeRequest) (*types.Empty, error) {
 	defer logPanicAndDie(log.G(requestCtx))
 
 	log.G(requestCtx).WithField("task_id", req.ID).Debug("resume")
@@ -1543,7 +1594,7 @@ func (s *service) Resume(requestCtx context.Context, req *taskAPI.ResumeRequest)
 }
 
 // Kill a process with the provided signal
-func (s *service) Kill(requestCtx context.Context, req *taskAPI.KillRequest) (*ptypes.Empty, error) {
+func (s *service) Kill(requestCtx context.Context, req *taskAPI.KillRequest) (*types.Empty, error) {
 	defer logPanicAndDie(log.G(requestCtx))
 
 	log.G(requestCtx).WithFields(logrus.Fields{"task_id": req.ID, "exec_id": req.ExecID}).Debug("kill")
@@ -1568,7 +1619,7 @@ func (s *service) Pids(requestCtx context.Context, req *taskAPI.PidsRequest) (*t
 }
 
 // CloseIO of a process
-func (s *service) CloseIO(requestCtx context.Context, req *taskAPI.CloseIORequest) (*ptypes.Empty, error) {
+func (s *service) CloseIO(requestCtx context.Context, req *taskAPI.CloseIORequest) (*types.Empty, error) {
 	defer logPanicAndDie(log.G(requestCtx))
 
 	log.G(requestCtx).WithFields(logrus.Fields{"task_id": req.ID, "exec_id": req.ExecID}).Debug("close_io")
@@ -1581,7 +1632,7 @@ func (s *service) CloseIO(requestCtx context.Context, req *taskAPI.CloseIOReques
 }
 
 // Checkpoint the container
-func (s *service) Checkpoint(requestCtx context.Context, req *taskAPI.CheckpointTaskRequest) (*ptypes.Empty, error) {
+func (s *service) Checkpoint(requestCtx context.Context, req *taskAPI.CheckpointTaskRequest) (*types.Empty, error) {
 	defer logPanicAndDie(log.G(requestCtx))
 
 	log.G(requestCtx).WithFields(logrus.Fields{"task_id": req.ID, "path": req.Path}).Info("checkpoint")
@@ -1597,12 +1648,13 @@ func (s *service) Checkpoint(requestCtx context.Context, req *taskAPI.Checkpoint
 func (s *service) Connect(requestCtx context.Context, req *taskAPI.ConnectRequest) (*taskAPI.ConnectResponse, error) {
 	defer logPanicAndDie(log.G(requestCtx))
 
-	// Since task_pid inside the micro VM wouldn't make sense for clients,
-	// we intentionally return ErrNotImplemented instead of forwarding that to the guest-side shim.
-	// https://github.com/firecracker-microvm/firecracker-containerd/issues/210
-	log.G(requestCtx).WithField("task_id", req.ID).Error(`"connect" is not implemented by the shim`)
+	log.G(requestCtx).WithField("id", req.ID).Debug("connect")
+	resp, err := s.agentClient.Connect(requestCtx, req)
+	if err != nil {
+		return nil, err
+	}
 
-	return nil, errdefs.ErrNotImplemented
+	return resp, nil
 }
 
 // Shutdown will shutdown of the VMM. Unlike StopVM, this method is only exposed to containerd itself.
@@ -1614,103 +1666,89 @@ func (s *service) Connect(requestCtx context.Context, req *taskAPI.ConnectReques
 // containerd calls this API on behalf of the user in the following cases:
 // * After any task is deleted via containerd's API
 // * After any task Create call returns an error
-func (s *service) Shutdown(requestCtx context.Context, req *taskAPI.ShutdownRequest) (*ptypes.Empty, error) {
+func (s *service) Shutdown(requestCtx context.Context, req *taskAPI.ShutdownRequest) (*types.Empty, error) {
 	defer logPanicAndDie(log.G(requestCtx))
 	s.logger.WithFields(logrus.Fields{"task_id": req.ID, "now": req.Now}).Debug("Shutdown")
 
 	shouldShutdown := req.Now || s.exitAfterAllTasksDeleted && s.taskManager.ShutdownIfEmpty()
 	if !shouldShutdown {
-		return &ptypes.Empty{}, nil
+		return &types.Empty{}, nil
 	}
 
-	if err := s.shutdown(requestCtx, defaultShutdownTimeout, req); err != nil {
-		return &ptypes.Empty{}, err
+	ctx, cancel := context.WithTimeout(requestCtx, defaultShutdownTimeout)
+	defer cancel()
+
+	if err := s.terminate(ctx); err != nil {
+		return &types.Empty{}, err
 	}
 
-	return &ptypes.Empty{}, nil
+	return &types.Empty{}, nil
 }
 
-func (s *service) shutdown(
-	requestCtx context.Context,
-	timeout time.Duration,
-	req *taskAPI.ShutdownRequest,
-) error {
-	s.logger.Info("stopping the VM")
+func (s *service) isPaused(ctx context.Context) (bool, error) {
+	info, err := s.machine.DescribeInstanceInfo(ctx)
+	if err != nil {
+		return false, errors.Wrapf(err, "failed to get instance info %v", info)
+	}
+	return *info.State == models.InstanceInfoStatePaused, nil
+}
 
-	go func() {
-		s.shutdownLoop(requestCtx, timeout, req)
+func (s *service) forceTerminate(ctx context.Context) error {
+	s.logger.Errorf("forcefully terminate VM %s", s.vmID)
+
+	err := s.jailer.Stop(true)
+	if err != nil {
+		s.logger.WithError(err).Error("failed to stop")
+	}
+
+	err = s.cleanup()
+	if err != nil {
+		s.logger.WithError(err).Error("failed to cleanup")
+	}
+
+	return status.Errorf(codes.Internal, "forcefully terminated VM %s", s.vmID)
+}
+
+func (s *service) terminate(ctx context.Context) (retErr error) {
+	var success bool
+	defer func() {
+		if !success {
+			retErr = s.forceTerminate(ctx)
+		}
 	}()
 
-	var result *multierror.Error
-	if err := s.machine.Wait(context.Background()); err != nil {
-		result = multierror.Append(result, err)
-	}
-	if err := s.cleanup(); err != nil {
-		result = multierror.Append(result, err)
+	err := s.waitVMReady()
+	if err != nil {
+		s.logger.WithError(err).Error("failed to wait VM")
+		return
 	}
 
-	if err := result.ErrorOrNil(); err != nil {
-		return status.Error(codes.Internal, fmt.Sprintf("the VMM was killed forcibly: %v", err))
-	}
-	return nil
-}
-
-// shutdownLoop sends multiple different shutdown requests to stop the VMM.
-// 1) send a request to the in-VM agent, which is presumed to cause the VM to begin a reboot.
-// 2) stop the VM through jailer#Stop(). The signal should be visible from the VMM (e.g. SIGTERM)
-// 3) stop the VM through cancelling the associated context. The signal would not be visible from the VMM (e.g. SIGKILL)
-func (s *service) shutdownLoop(
-	requestCtx context.Context,
-	timeout time.Duration,
-	req *taskAPI.ShutdownRequest,
-) {
-	actions := []struct {
-		name     string
-		shutdown func() error
-		timeout  time.Duration
-	}{
-		{
-			name: "send a request to the in-VM agent",
-			shutdown: func() error {
-				_, err := s.agentClient.Shutdown(requestCtx, req)
-				if err != nil {
-					return err
-				}
-				return nil
-			},
-			timeout: timeout,
-		},
-		{
-			name: "stop the jailer by SIGTERM",
-			shutdown: func() error {
-				return s.jailer.Stop(false)
-			},
-			timeout: jailerStopTimeout,
-		},
-		{
-			name: "stop the jailer by SIGKILL",
-			shutdown: func() error {
-				return s.jailer.Stop(true)
-			},
-			timeout: jailerStopTimeout,
-		},
+	paused, err := s.isPaused(ctx)
+	if err != nil {
+		s.logger.WithError(err).Error("failed to check VM")
+		return
 	}
 
-	for _, action := range actions {
-		pid, err := s.machine.PID()
-		if pid == 0 && err != nil {
-			break // we have nothing to kill
-		}
-
-		s.logger.Debug(action.name)
-		err = action.shutdown()
-		if err != nil {
-			// if sending an request doesn't succeed, don't wait and carry on.
-			s.logger.WithError(err).Errorf("failed to %s", action.name)
-		} else {
-			time.Sleep(action.timeout)
-		}
+	if paused {
+		s.logger.Error("VM is paused and cannot take requests")
+		return
 	}
+
+	s.logger.Info("gracefully shutdown VM")
+	_, err = s.agentClient.Shutdown(ctx, &taskAPI.ShutdownRequest{ID: s.vmID, Now: true})
+	if err != nil {
+		s.logger.WithError(err).Error("failed to call in-VM agent")
+		return
+	}
+
+	err = s.machine.Wait(ctx)
+	if err != nil {
+		s.logger.WithError(err).Error("failed to wait VM")
+		return
+	}
+
+	success = true
+	return
 }
 
 func (s *service) Stats(requestCtx context.Context, req *taskAPI.StatsRequest) (*taskAPI.StatsResponse, error) {
@@ -1726,7 +1764,7 @@ func (s *service) Stats(requestCtx context.Context, req *taskAPI.StatsRequest) (
 }
 
 // Update a running container
-func (s *service) Update(requestCtx context.Context, req *taskAPI.UpdateTaskRequest) (*ptypes.Empty, error) {
+func (s *service) Update(requestCtx context.Context, req *taskAPI.UpdateTaskRequest) (*types.Empty, error) {
 	defer logPanicAndDie(log.G(requestCtx))
 	log.G(requestCtx).WithField("task_id", req.ID).Debug("update")
 
@@ -1794,7 +1832,6 @@ func (s *service) cleanup() error {
 }
 
 // monitorVMExit watches the VM and cleanup resources when it terminates.
-// Comment out because unused
 func (s *service) monitorVMExit() {
 	// Block until the VM exits
 	if err := s.machine.Wait(s.shimCtx); err != nil && err != context.Canceled {
@@ -2000,35 +2037,6 @@ func (s *service) dialFirecrackerSocket() error {
 	return nil
 }
 
-// PauseVM Pauses a VM
-func (s *service) PauseVM(ctx context.Context, req *proto.PauseVMRequest) (*empty.Empty, error) {
-	pauseReq, err := formPauseReq()
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to create pause vm request")
-		return nil, err
-	}
-
-	err = s.waitVMReady()
-	if err != nil {
-		return nil, err
-	}
-
-	if s.networkNamespace == "" {
-		err = s.SendPauseVmRequest(pauseReq)
-	} else {
-		err = s.netNS.Do(func(_ ns.NetNS) error {
-			return s.SendPauseVmRequest(pauseReq)
-		})
-	}
-
-	if err != nil {
-		s.logger.WithError(err).Error("Pause VM failed")
-		return nil, err
-	}
-
-	return &empty.Empty{}, nil
-}
-
 // SendPauseVmRequest sends a pause http request to the firecracker process
 func (s *service) SendPauseVmRequest(pauseReq *http.Request) error {
 	resp, err := s.httpControlClient.Do(pauseReq)
@@ -2042,30 +2050,6 @@ func (s *service) SendPauseVmRequest(pauseReq *http.Request) error {
 	}
 
 	return nil
-}
-
-// ResumeVM Resumes a VM
-func (s *service) ResumeVM(ctx context.Context, req *proto.ResumeVMRequest) (*empty.Empty, error) {
-	resumeReq, err := formResumeReq()
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to create resume vm request")
-		return nil, err
-	}
-
-	if s.networkNamespace == "" {
-		err = s.SendResumeVmRequest(resumeReq)
-	} else {
-		err = s.netNS.Do(func(_ ns.NetNS) error {
-			return s.SendResumeVmRequest(resumeReq)
-		})
-	}
-
-	if err != nil {
-		s.logger.WithError(err).Error("Resume VM failed")
-		return nil, err
-	}
-
-	return &empty.Empty{}, nil
 }
 
 // SendResumeVmRequest sends a resume http request to the firecracker process
@@ -2153,7 +2137,7 @@ func (s *service) SendLoadSnapRequest(loadSnapReq *http.Request) error {
 }
 
 // CreateSnapshot Creates a snapshot of a VM
-func (s *service) CreateSnapshot(ctx context.Context, req *proto.CreateSnapshotRequest) (*empty.Empty, error) {
+func (s *service) CreateSnapshot(ctx context.Context, req *proto.CreateSnapshotRequest) (*types.Empty, error) {
 	createSnapReq, err := formCreateSnapReq(req.SnapshotFilePath, req.MemFilePath, req.SnapshotType)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to create make snapshot request")
@@ -2173,7 +2157,7 @@ func (s *service) CreateSnapshot(ctx context.Context, req *proto.CreateSnapshotR
 		return nil, err
 	}
 
-	return &empty.Empty{}, nil
+	return &types.Empty{}, nil
 }
 
 // SendCreateSnapRequest sends a create snapshot http request to the firecracker process
@@ -2193,7 +2177,7 @@ func (s *service) SendCreateSnapRequest(createSnapReq *http.Request) error {
 
 // Offload Shuts down a VM and deletes the corresponding firecracker socket
 // and vsock. All of the other resources will persist.
-func (s *service) Offload(ctx context.Context, req *proto.OffloadRequest) (*empty.Empty, error) {
+func (s *service) Offload(ctx context.Context, req *proto.OffloadRequest) (*types.Empty, error) {
 
 	if err := syscall.Kill(s.firecrackerPid, 9); err != nil {
 		s.logger.WithError(err).Error("Failed to kill firecracker process")
@@ -2215,5 +2199,5 @@ func (s *service) Offload(ctx context.Context, req *proto.OffloadRequest) (*empt
 		return nil, err
 	}
 
-	return &empty.Empty{}, nil
+	return &types.Empty{}, nil
 }

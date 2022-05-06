@@ -21,8 +21,9 @@ import (
 	"github.com/containerd/containerd/pkg/seed"
 
 	// Register containerd builtins
-	// See https://github.com/containerd/containerd/blob/master/cmd/containerd/builtins.go
+	// See https://github.com/containerd/containerd/blob/main/cmd/containerd/builtins.go
 	_ "github.com/containerd/containerd/diff/walking/plugin"
+	_ "github.com/containerd/containerd/events/plugin"
 	_ "github.com/containerd/containerd/gc/scheduler"
 	_ "github.com/containerd/containerd/runtime/restart/monitor"
 	_ "github.com/containerd/containerd/services/containers"
@@ -40,7 +41,7 @@ import (
 	_ "github.com/containerd/containerd/services/version"
 
 	// Linux specific builtins
-	// See https://github.com/containerd/containerd/blob/master/cmd/containerd/builtins_linux.go
+	// See https://github.com/containerd/containerd/blob/main/cmd/containerd/builtins_linux.go
 	_ "github.com/containerd/containerd/metrics/cgroups"
 	_ "github.com/containerd/containerd/runtime/v1/linux"
 	_ "github.com/containerd/containerd/runtime/v2"
@@ -49,6 +50,9 @@ import (
 	// Snapshotters
 	_ "github.com/containerd/containerd/snapshots/devmapper/plugin"
 	_ "github.com/containerd/containerd/snapshots/overlay/plugin"
+
+	// Register cri plugin
+	_ "github.com/containerd/containerd/pkg/cri"
 
 	// Register fc-control plugin
 	_ "github.com/firecracker-microvm/firecracker-containerd/firecracker-control"

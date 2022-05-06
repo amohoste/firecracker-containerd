@@ -22,10 +22,13 @@ FIRECRACKER_CONTAINERD_TEST_IMAGE?=localhost/firecracker-containerd-test
 
 all: examples
 
-examples: taskworkflow
+examples: taskworkflow remote-snapshotter
 
 taskworkflow: taskworkflow.go $(GOMOD) $(GOSUM)
 	go build -o taskworkflow taskworkflow.go
+
+remote-snapshotter:
+	make -C cmd/remote-snapshotter $@
 
 test:
 	go test ./... $(EXTRAGOARGS)
@@ -52,7 +55,7 @@ TEST_GATEWAY?=172.16.0.1
 TEST_IP?=172.16.0.2
 TEST_SUBNET?=/24
 FICD_DM_VOLUME_GROUP?=
-TEST_POOL?=testpool
+TEST_POOL?=fc-test-thinpool
 testtap:
 	ip link add br0 type bridge
 	ip tuntap add tap0 mode tap
@@ -63,10 +66,11 @@ testtap:
 
 clean:
 	- rm -f taskworkflow
+	- make -C cmd/remote-snapshotter $@
 
 distclean: clean
 	- rm -rf logs
 
 install:
 
-.PHONY: all examples clean distclean install test integ-test testtap
+.PHONY: all examples clean distclean install test integ-test testtap remote-snapshotter

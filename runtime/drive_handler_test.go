@@ -15,12 +15,11 @@ package main
 
 import (
 	"context"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
-
-	"io/ioutil"
 
 	"github.com/containerd/containerd/log"
 	"github.com/firecracker-microvm/firecracker-containerd/internal/vm"
@@ -29,7 +28,7 @@ import (
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
 	ops "github.com/firecracker-microvm/firecracker-go-sdk/client/operations"
 	"github.com/firecracker-microvm/firecracker-go-sdk/fctesting"
-	"github.com/golang/protobuf/ptypes/empty"
+	"github.com/gogo/protobuf/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,7 +42,7 @@ type MockDriveMounter struct {
 	expectedOptions         []string
 }
 
-func (m *MockDriveMounter) MountDrive(ctx context.Context, req *drivemount.MountDriveRequest) (*empty.Empty, error) {
+func (m *MockDriveMounter) MountDrive(ctx context.Context, req *drivemount.MountDriveRequest) (*types.Empty, error) {
 	assert.Equal(m.t, m.expectedDestinationPath, req.DestinationPath)
 	assert.Equal(m.t, m.expectedFilesystemType, req.FilesytemType)
 	assert.Equal(m.t, m.expectedOptions, req.Options)
@@ -54,12 +53,10 @@ func TestContainerStubs(t *testing.T) {
 	ctx := context.Background()
 	logger := log.G(ctx)
 
-	tmpDir, err := ioutil.TempDir("", "TestCreateContainerStubs")
-	require.NoError(t, err, "failed to create temporary directory")
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	stubDir := filepath.Join(tmpDir, "stubs")
-	err = os.MkdirAll(stubDir, 0700)
+	err := os.MkdirAll(stubDir, 0700)
 	require.NoError(t, err, "failed to create stub dir")
 
 	patchedSrcDir := filepath.Join(tmpDir, "patchedSrcs")
@@ -127,12 +124,10 @@ func TestDriveMountStubs(t *testing.T) {
 	ctx := context.Background()
 	logger := log.G(ctx)
 
-	tmpDir, err := ioutil.TempDir("", "Test-CreateContainerStubs")
-	require.NoError(t, err, "failed to create temporary directory")
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	stubDir := filepath.Join(tmpDir, "stubs")
-	err = os.MkdirAll(stubDir, 0700)
+	err := os.MkdirAll(stubDir, 0700)
 	require.NoError(t, err, "failed to create stub dir")
 
 	patchedSrcDir := filepath.Join(tmpDir, "patchedSrcs")
@@ -201,6 +196,24 @@ func TestDriveMountStubs(t *testing.T) {
 			},
 			IsWritable: true,
 		},
+		{
+			HostPath:       "/foo/5",
+			VMPath:         "/bar/5",
+			FilesystemType: "blah5",
+			Options:        []string{"blerg5"},
+			RateLimiter:    nil,
+			IsWritable:     true,
+			CacheType:      "",
+		},
+		{
+			HostPath:       "/foo/6",
+			VMPath:         "/bar/6",
+			FilesystemType: "blah6",
+			Options:        []string{"blerg6"},
+			RateLimiter:    nil,
+			IsWritable:     true,
+			CacheType:      "Unsafe",
+		},
 	}
 
 	mountableStubDrives, err := CreateDriveMountStubs(machineCfg, noopJailer, inputDriveMounts, logger)
@@ -217,6 +230,7 @@ func TestDriveMountStubs(t *testing.T) {
 		fsType := inputDriveMount.FilesystemType
 		rateLimiter := inputDriveMount.RateLimiter
 		isWritable := inputDriveMount.IsWritable
+		cacheType := inputDriveMount.CacheType
 
 		fsOptions := inputDriveMount.Options
 		if isWritable {
@@ -236,6 +250,7 @@ func TestDriveMountStubs(t *testing.T) {
 		assert.Equal(t, fsOptions, stub.driveMount.Options)
 		assert.Equal(t, rateLimiter, stub.driveMount.RateLimiter)
 		assert.Equal(t, isWritable, stub.driveMount.IsWritable)
+		assert.Equal(t, cacheType, stub.driveMount.CacheType)
 
 		mockMachine, err := firecracker.NewMachine(ctx, firecracker.Config{}, firecracker.WithClient(
 			firecracker.NewClient("/path/to/socket", nil, false, firecracker.WithOpsClient(&fctesting.MockClient{

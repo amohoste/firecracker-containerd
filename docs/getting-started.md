@@ -39,7 +39,7 @@ You need to have the following things in order to use firecracker-containerd:
   </details>
 * git
 * A recent installation of [Docker CE](https://docker.com).
-* Go 1.13 or later, which you can download from [here](https://golang.org/dl/).
+* Go 1.16 or later, which you can download from [here](https://golang.org/dl/).
 
 ## Setup
 
@@ -247,7 +247,7 @@ configuration file has the following fields:
 {
   "firecracker_binary_path": "/usr/local/bin/firecracker",
   "kernel_image_path": "/var/lib/firecracker-containerd/runtime/hello-vmlinux.bin",
-  "kernel_args": "console=ttyS0 noapic reboot=k panic=1 pci=off nomodules ro systemd.journald.forward_to_console systemd.unit=firecracker.target init=/sbin/overlay-init",
+  "kernel_args": "console=ttyS0 noapic reboot=k panic=1 pci=off nomodules ro systemd.unified_cgroup_hierarchy=0 systemd.journald.forward_to_console systemd.unit=firecracker.target init=/sbin/overlay-init",
   "root_drive": "/var/lib/firecracker-containerd/runtime/default-rootfs.img",
   "cpu_template": "T2",
   "log_fifo": "fc-logs.fifo",
